@@ -1,0 +1,23 @@
+{
+  "name": "agent-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Provider-resilient engineering orchestration for Beads-driven worktrees.",
+  "bin": {
+    "relay": "./scripts/relay.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:ci": "node --test --test-reporter=spec test/*.test.mjs",
+    "lint": "node scripts/check-links.mjs && node scripts/scan-privacy.mjs && node scripts/validate-site.mjs && node scripts/validate-marketplaces.mjs",
+    "check": "node scripts/sync-roles.mjs --check && node scripts/sync-adapters.mjs --check",
+    "validate:codex-plugin": "node scripts/validate-codex-plugin.mjs",
+    "validate:codex-plugin-official": "python3 /home/example-user/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .",
+    "validate:claude-plugin": "node scripts/validate-claude-plugin.mjs",
+    "validate": "npm run test && npm run lint && npm run check && npm run validate:codex-plugin && npm run validate:claude-plugin"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  }
+}
