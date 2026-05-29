@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-relay/project-adapter.schema.json",
+  "type": "object",
+  "required": [
+    "name",
+    "version",
+    "repository",
+    "beads",
+    "guidance",
+    "gates",
+    "controlPlane",
+    "providers",
+    "riskClasses",
+    "humanOnlyActions"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "repository": {
+      "type": "object",
+      "required": [
+        "kind",
+        "baseBranch",
+        "worktreeSetupCommand"
+      ],
+      "properties": {
+        "kind": {
+          "const": "git"
+        },
+        "baseBranch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worktreeSetupCommand": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "beads": {
+      "type": "object",
+      "required": [
+        "requiredDir",
+        "memoryKey"
+      ],
+      "properties": {
+        "requiredDir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "memoryKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "guidance": {
+      "type": "object",
+      "required": [
+        "requiredFiles",
+        "protectedLawFiles",
+        "architectureRoots",
+        "prTemplate",
+        "noAttribution"
+      ],
+      "properties": {
+        "requiredFiles": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "protectedLawFiles": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "architectureRoots": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "prTemplate": {
+          "type": "string"
+        },
+        "noAttribution": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "type": "object",
+      "required": [
+        "groups"
+      ],
+      "properties": {
+        "groups": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/gate"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "controlPlane": {
+      "type": "object",
+      "required": [
+        "protectedPaths"
+      ],
+      "properties": {
+        "protectedPaths": {
+          "$ref": "#/$defs/stringArray"
+        }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "required": [
+        "orchestratorOrder",
+        "capabilities"
+      ],
+      "properties": {
+        "orchestratorOrder": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "capabilities": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "roles",
+              "timeoutMs"
+            ],
+            "properties": {
+              "roles": {
+                "$ref": "#/$defs/stringArray"
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "riskClasses": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "reviewVendors",
+          "strongReviewersOnly"
+        ],
+        "properties": {
+          "reviewVendors": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "strongReviewersOnly": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "humanOnlyActions": {
+      "$ref": "#/$defs/stringArray"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "humanOnly": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

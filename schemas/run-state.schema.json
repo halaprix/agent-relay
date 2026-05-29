@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-relay/run-state.schema.json",
+  "type": "object",
+  "required": [
+    "beadId",
+    "phase",
+    "projectRoot",
+    "adapterName",
+    "specHash",
+    "ownedPaths",
+    "riskClass",
+    "providerCursor",
+    "planReview",
+    "reviewState",
+    "timestamps"
+  ],
+  "properties": {
+    "beadId": {
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "planning",
+        "awaiting-plan-approval",
+        "implementing",
+        "reviewing",
+        "delivering",
+        "awaiting-human",
+        "complete"
+      ]
+    },
+    "projectRoot": {
+      "type": "string"
+    },
+    "adapterName": {
+      "type": "string"
+    },
+    "specHash": {
+      "type": "string"
+    },
+    "ownedPaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "riskClass": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "worktreePath": {
+      "type": "string"
+    },
+    "baseSha": {
+      "type": "string"
+    },
+    "providerCursor": {
+      "type": "object",
+      "required": [
+        "coderIndex",
+        "reviewProvidersTried"
+      ],
+      "properties": {
+        "coderIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reviewProvidersTried": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "planReview": {
+      "type": "object",
+      "required": [
+        "completed",
+        "findingsResolved",
+        "reviewers",
+        "findings",
+        "approvalRequired",
+        "approvalSpecHash"
+      ],
+      "properties": {
+        "completed": {
+          "type": "boolean"
+        },
+        "findingsResolved": {
+          "type": "boolean"
+        },
+        "reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "provider",
+              "status",
+              "summary",
+              "findings"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "findings": {
+                "type": "array"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "approvalRequired": {
+          "type": "boolean"
+        },
+        "approvalSpecHash": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "reviewState": {
+      "type": "object",
+      "required": [
+        "requiredVendors",
+        "completedVendors",
+        "findingsResolved"
+      ],
+      "properties": {
+        "requiredVendors": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "completedVendors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "findingsResolved": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "timestamps": {
+      "type": "object",
+      "required": [
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "delivery": {
+      "type": "object",
+      "properties": {
+        "prUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "pendingCorrection": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

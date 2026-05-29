@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-relay/worker-report.schema.json",
+  "type": "object",
+  "required": [
+    "status",
+    "summary",
+    "ownedPaths",
+    "commandsAttempted",
+    "changedPaths"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "success",
+        "needs-fix",
+        "provider-failure",
+        "human-action-required"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ownedPaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commandsAttempted": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "changedPaths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "gatesClaimed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

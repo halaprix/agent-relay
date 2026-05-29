@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agent-relay/review-report.schema.json",
+  "type": "object",
+  "required": [
+    "status",
+    "summary",
+    "findings",
+    "commandsAttempted"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "success",
+        "needs-fix"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "severity",
+          "title"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "commandsAttempted": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}
