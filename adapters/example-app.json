@@ -1,0 +1,192 @@
+{
+  "$schema": "../schemas/project-adapter.schema.json",
+  "name": "example-app",
+  "version": 1,
+  "repository": {
+    "kind": "git",
+    "baseBranch": "dev",
+    "worktreeSetupCommand": [
+      "scripts/dev/worktree-setup.sh"
+    ]
+  },
+  "beads": {
+    "requiredDir": "/home/example-user/.example-beads",
+    "memoryKey": "agent-instruction-files-structure"
+  },
+  "guidance": {
+    "requiredFiles": [
+      "AGENTS.md",
+      "STATE.md",
+      "docs/architecture/architecture-overview.md",
+      "docs/architecture/data-model.md",
+      "docs/architecture/module-map.md"
+    ],
+    "protectedLawFiles": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "GEMINI.md",
+      "STATE.md"
+    ],
+    "architectureRoots": [
+      "docs/architecture",
+      "docs/adr"
+    ],
+    "prTemplate": ".github/PULL_REQUEST_TEMPLATE.md",
+    "noAttribution": true
+  },
+  "gates": {
+    "routing": {
+      "planReviewDefault": [],
+      "implementationDefault": [
+        "types-and-tests"
+      ],
+      "implementationByRisk": {
+        "solidity-core": [
+          "types-and-tests",
+          "solidity"
+        ],
+        "money-path": [
+          "types-and-tests"
+        ]
+      },
+      "deliveryFull": [
+        "pre-push"
+      ],
+      "humanApproval": [
+        "browser-walkthroughs"
+      ]
+    },
+    "groups": {
+      "formatting": [
+        {
+          "name": "format",
+          "command": [
+            "pnpm",
+            "format"
+          ]
+        }
+      ],
+      "types-and-tests": [
+        {
+          "name": "workspace-lint-check-types",
+          "command": [
+            "pnpm",
+            "turbo",
+            "run",
+            "lint",
+            "check-types"
+          ]
+        }
+      ],
+      "solidity": [
+        {
+          "name": "forge-build",
+          "cwd": "packages/contracts",
+          "command": [
+            "forge",
+            "build"
+          ]
+        }
+      ],
+      "browser-walkthroughs": [
+        {
+          "name": "manual-browser-walkthrough",
+          "humanOnly": true,
+          "reason": "Browser walkthroughs require a supervised human or dedicated GUI runner."
+        }
+      ],
+      "pre-push": [
+        {
+          "name": "format",
+          "command": [
+            "pnpm",
+            "format"
+          ]
+        },
+        {
+          "name": "workspace-lint-check-types",
+          "command": [
+            "pnpm",
+            "turbo",
+            "run",
+            "lint",
+            "check-types"
+          ]
+        }
+      ]
+    }
+  },
+  "controlPlane": {
+    "protectedPaths": [
+      ".github/workflows",
+      ".claude",
+      ".codex",
+      ".agents/skills",
+      "docs/architecture",
+      "docs/adr"
+    ]
+  },
+  "providers": {
+    "orchestratorOrder": [
+      "claude",
+      "codex",
+      "agy"
+    ],
+    "capabilities": {
+      "claude": {
+        "roles": [
+          "orchestrator",
+          "coder",
+          "reviewer"
+        ],
+        "timeoutMs": 1800000
+      },
+      "codex": {
+        "roles": [
+          "orchestrator",
+          "coder",
+          "reviewer"
+        ],
+        "timeoutMs": 1800000
+      },
+      "agy": {
+        "roles": [
+          "orchestrator",
+          "coder",
+          "reviewer"
+        ],
+        "timeoutMs": 1800000
+      }
+    }
+  },
+  "riskClasses": {
+    "documentation": {
+      "reviewVendors": 1,
+      "strongReviewersOnly": false
+    },
+    "normal-code": {
+      "reviewVendors": 2,
+      "strongReviewersOnly": false
+    },
+    "money-path": {
+      "reviewVendors": 2,
+      "strongReviewersOnly": true
+    },
+    "solidity-core": {
+      "reviewVendors": 2,
+      "strongReviewersOnly": true
+    },
+    "shared-infrastructure": {
+      "reviewVendors": 2,
+      "strongReviewersOnly": true
+    }
+  },
+  "humanOnlyActions": [
+    "merge",
+    "destructive-cleanup",
+    "shared-infrastructure",
+    "deployment",
+    "access-control-change",
+    "real-chain-write"
+  ]
+}
