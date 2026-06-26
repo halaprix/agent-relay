@@ -1,0 +1,33 @@
+{
+  "name": "agent-relay",
+  "version": "0.1.0",
+  "description": "Provider-resilient engineering orchestration for Beads-governed work.",
+  "author": {
+    "name": "Agent Relay Team"
+  },
+  "license": "MIT",
+  "keywords": [
+    "beads",
+    "orchestration",
+    "worktree",
+    "review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Relay",
+    "shortDescription": "Beads-first provider handoff for engineering work.",
+    "longDescription": "Runs a provider-neutral supervisor that plans, executes, verifies gates, and pauses at review-clean PR handoff boundaries.",
+    "developerName": "Agent Relay Team",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Set up Agent Relay for the current project.",
+      "Run the relay plan flow for bead example-app-123.",
+      "Show the current relay status for a bead."
+    ],
+    "brandColor": "#1E5B7A"
+  }
+}

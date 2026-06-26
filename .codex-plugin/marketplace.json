@@ -1,0 +1,20 @@
+{
+  "name": "agent-relay-local",
+  "interface": {
+    "displayName": "Agent Relay Local"
+  },
+  "plugins": [
+    {
+      "name": "agent-relay",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-relay"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

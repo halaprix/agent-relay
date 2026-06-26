@@ -1,0 +1,24 @@
+{
+  "name": "agent-relay",
+  "version": "0.1.0",
+  "description": "Provider-resilient engineering orchestration for Beads-governed work.",
+  "defaultEnabled": false,
+  "skills": [
+    "./skills/"
+  ],
+  "agents": [
+    "./agents/"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Agent Relay",
+    "shortDescription": "Beads-first provider handoff for engineering work.",
+    "longDescription": "Runs a provider-neutral supervisor that plans, executes, verifies gates, and pauses at review-clean PR handoff boundaries.",
+    "developerName": "Agent Relay Team",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ]
+  }
+}
