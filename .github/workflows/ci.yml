@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install nothing
+        run: npm --version
+      - name: Sync generated roles
+        run: node scripts/sync-roles.mjs
+      - name: Sync adapters
+        run: node scripts/sync-adapters.mjs
+      - name: Run Node tests
+        run: npm test
+      - name: Run lint-style validators
+        run: npm run lint
+      - name: Validate role and adapter generation
+        run: npm run check
+      - name: Validate Codex plugin
+        run: npm run validate:codex-plugin
+      - name: Validate Claude plugin
+        run: npm run validate:claude-plugin
+      - name: Shell syntax
+        run: |
+          set -eu
+          find scripts -name '*.sh' -print0 | xargs -0 -r bash -n

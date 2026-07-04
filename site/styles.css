@@ -1,0 +1,95 @@
+:root {
+  --ink: #11212d;
+  --muted: #365565;
+  --paper: #f5f0e6;
+  --accent: #c56b2d;
+  --line: rgba(17, 33, 45, 0.16);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top right, rgba(197, 107, 45, 0.16), transparent 28rem),
+    linear-gradient(180deg, #fff9f1 0%, var(--paper) 100%);
+  color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", serif;
+}
+
+.shell {
+  max-width: 58rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 5rem;
+}
+
+.hero {
+  padding: 2rem 0 1rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.75rem;
+  color: var(--accent);
+  font-size: 0.85rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1,
+h2 {
+  font-weight: 700;
+  line-height: 1.05;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(3rem, 7vw, 5rem);
+}
+
+h2 {
+  margin: 0 0 1rem;
+  font-size: 1.6rem;
+}
+
+.lede,
+li,
+p {
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+section {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 1.2rem;
+  background: rgba(255, 255, 255, 0.65);
+  backdrop-filter: blur(6px);
+}
+
+.diagram {
+  overflow: auto;
+  margin: 0;
+  padding: 1rem;
+  border-radius: 0.8rem;
+  background: #10242f;
+  color: #f3efe7;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 2rem 1rem 4rem;
+  }
+
+  section {
+    padding: 1.1rem;
+  }
+}

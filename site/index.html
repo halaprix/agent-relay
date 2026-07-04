@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Relay</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Provider-resilient engineering orchestration</p>
+        <h1>Agent Relay</h1>
+        <p class="lede">
+          Beads stays authoritative while a neutral supervisor routes Claude, Codex, and agy through the same worktree, evidence, and review record.
+        </p>
+      </section>
+      <section>
+        <h2>Architecture</h2>
+        <pre class="diagram">Beads
+  |
+  v
+Neutral supervisor
+  |
+  +--> provider routing --> isolated worktree --> gates --> multi-vendor review
+  |
+  +--> checkpoint ledger --> resume / status
+  |
+  +--> human-only merge handoff</pre>
+      </section>
+      <section>
+        <h2>Workflow</h2>
+        <ol>
+          <li>Recover the Bead, project law, and live store identity.</li>
+          <li>Plan, checkpoint, and pause for durable decisions.</li>
+          <li>Run one owned workstream per isolated worktree.</li>
+          <li>Re-run gates independently and review with distinct vendors.</li>
+          <li>Stop at a review-clean PR for human merge.</li>
+        </ol>
+      </section>
+      <section>
+        <h2>Safety model</h2>
+        <ul>
+          <li>Workers use <code>bd --readonly</code>; the supervisor is the only Beads writer.</li>
+          <li>Protected paths, blanket staging, remote mutation, and attribution are blocked.</li>
+          <li>Dirty worktrees are preserved for inspection instead of being deleted automatically.</li>
+          <li>Review-clean PR delivery runs only when delivery is configured; otherwise the run pauses for a human.</li>
+        </ul>
+      </section>
+      <section>
+        <h2>Setup</h2>
+        <p>Install the plugin, then run <code>relay setup --adapter example-app</code> from the target project root.</p>
+      </section>
+    </main>
+  </body>
+</html>
