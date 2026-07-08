@@ -18,11 +18,11 @@ Neutral supervisor
 ## Installation
 
 Claude:
-- Load the plugin from `.claude-plugin/`.
+- Load the plugin from `.claude-plugin/`, or from the repo-local marketplace entry that resolves to `plugins/agent-relay`.
 
 Codex:
 - Load the plugin from `.codex-plugin/`.
-- The repo-local marketplace entry lives at `.codex-plugin/marketplace.json`.
+- The repo-local marketplace entry lives at `.codex-plugin/marketplace.json` and resolves to `plugins/agent-relay`.
 
 agy:
 - Import the Claude-compatible plugin metadata and sync the generated roles from `.agents/agents/`.
@@ -35,6 +35,8 @@ agy:
 4. Plan the Bead with `relay plan <bead-id>`.
 5. Execute or reattach with `relay run <bead-id>` and `relay resume <bead-id>`.
 6. Run `relay review <bead-id>` to obtain vendor review and, when delivery is configured, create the PR.
+
+Version `0.1.0` ships as a local CLI/plugin package only. A transient per-user relay service is optional future work and is intentionally omitted from the packaged flow.
 
 ## Command surface
 
@@ -99,7 +101,8 @@ All commands return structured JSON and one of these stable exit classes:
 - Scope-locked diff artifacts and per-review prompt/output files are stored for each review round.
 - Money-path and Solidity work can request stronger reviewer pools and adversarial questions through adapter risk classes.
 - Configured high-risk classes pause for plan approval before implementation.
+- The Example adapter runs package-level SDK and app tests during implementation, reruns formatting plus workspace lint/check-types before delivery, and adds `forge build` plus `forge test` for Solidity risk.
 
 ## Static site
 
-The dependency-free site lives under `site/`. The Pages workflow is included, but private-repository publishing still depends on repository visibility and account plan support.
+The dependency-free site lives under `site/`. The Pages workflow reruns privacy and site validation before upload, but private-repository publishing still depends on repository visibility and account plan support.

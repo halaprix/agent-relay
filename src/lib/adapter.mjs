@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { readJson, writeJson } from "./fs.mjs";
 import { repoPath } from "./paths.mjs";
 import { assertString, assertStringArray, requireKeys } from "./schema.mjs";
@@ -51,10 +51,31 @@ export function validateAdapter(adapter) {
   if (typeof adapter.guidance.noAttribution !== "boolean") {
     throw new Error("adapter.guidance.noAttribution must be boolean");
   }
-  requireKeys("adapter.gates", adapter.gates, ["groups"]);
+  requireKeys("adapter.gates", adapter.gates, ["routing", "groups"]);
+  requireKeys("adapter.gates.routing", adapter.gates.routing, [
+    "planReviewDefault",
+    "implementationDefault",
+    "implementationByRisk",
+    "deliveryDefault",
+    "deliveryByRisk",
+    "deliveryFull",
+    "humanApproval"
+  ]);
+  assertStringArray(adapter.gates.routing.planReviewDefault, "adapter.gates.routing.planReviewDefault");
+  assertStringArray(adapter.gates.routing.implementationDefault, "adapter.gates.routing.implementationDefault");
+  assertStringArray(adapter.gates.routing.deliveryDefault, "adapter.gates.routing.deliveryDefault");
+  assertStringArray(adapter.gates.routing.deliveryFull, "adapter.gates.routing.deliveryFull");
+  assertStringArray(adapter.gates.routing.humanApproval, "adapter.gates.routing.humanApproval");
+  if (adapter.gates.routing.implementationByRisk === null || typeof adapter.gates.routing.implementationByRisk !== "object") {
+    throw new Error("adapter.gates.routing.implementationByRisk must be an object");
+  }
+  if (adapter.gates.routing.deliveryByRisk === null || typeof adapter.gates.routing.deliveryByRisk !== "object") {
+    throw new Error("adapter.gates.routing.deliveryByRisk must be an object");
+  }
   if (adapter.gates.groups === null || typeof adapter.gates.groups !== "object") {
     throw new Error("adapter.gates.groups must be an object");
   }
+  const gateGroupNames = new Set(Object.keys(adapter.gates.groups));
   for (const [groupName, gates] of Object.entries(adapter.gates.groups)) {
     assertString(groupName, "gate group name");
     if (!Array.isArray(gates) || gates.length === 0) {
@@ -66,6 +87,25 @@ export function validateAdapter(adapter) {
       if (!gate.humanOnly) {
         assertStringArray(gate.command, `gate ${groupName}.${gate.name}.command`);
       }
+    }
+  }
+  for (const [riskClass, route] of Object.entries(adapter.gates.routing.implementationByRisk)) {
+    assertStringArray(route, `adapter.gates.routing.implementationByRisk.${riskClass}`);
+  }
+  for (const [riskClass, route] of Object.entries(adapter.gates.routing.deliveryByRisk)) {
+    assertStringArray(route, `adapter.gates.routing.deliveryByRisk.${riskClass}`);
+  }
+  for (const route of [
+    ...adapter.gates.routing.planReviewDefault,
+    ...adapter.gates.routing.implementationDefault,
+    ...adapter.gates.routing.deliveryDefault,
+    ...adapter.gates.routing.deliveryFull,
+    ...adapter.gates.routing.humanApproval,
+    ...Object.values(adapter.gates.routing.implementationByRisk).flat(),
+    ...Object.values(adapter.gates.routing.deliveryByRisk).flat()
+  ]) {
+    if (!gateGroupNames.has(route)) {
+      throw new Error(`adapter.gates.routing references unknown gate group ${route}`);
     }
   }
   requireKeys("adapter.controlPlane", adapter.controlPlane, ["protectedPaths"]);
@@ -97,7 +137,19 @@ export function validateAdapter(adapter) {
   assertStringArray(adapter.humanOnlyActions, "adapter.humanOnlyActions");
 }
 
-export async function syncAdapters({ check = false } = {}) {
+function serializeRegistry(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+async function assertExactRegistry(filePath, registry) {
+  const actual = await readFile(filePath, "utf8").catch(() => null);
+  const expected = serializeRegistry({ adapters: registry });
+  if (actual !== expected) {
+    throw new Error(`generated adapter registry drift detected: ${filePath}`);
+  }
+}
+
+export async function syncAdapters({ check = false, outputPath = repoPath(".generated", "adapters.json") } = {}) {
   const adapterDir = repoPath("adapters");
   const adapterFiles = (await readdir(adapterDir)).filter((file) => file.endsWith(".json")).sort();
   const registry = [];
@@ -111,8 +163,10 @@ export async function syncAdapters({ check = false } = {}) {
       requiredFiles: adapter.guidance.requiredFiles
     });
   }
-  if (!check) {
-    await writeJson(repoPath(".generated", "adapters.json"), { adapters: registry });
+  if (check) {
+    await assertExactRegistry(outputPath, registry);
+    return registry;
   }
+  await writeJson(outputPath, { adapters: registry });
   return registry;
 }

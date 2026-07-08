@@ -1,8 +1,9 @@
 import path from "node:path";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdtemp, rename } from "node:fs/promises";
+import os from "node:os";
 import { loadAdapter, syncAdapters } from "./adapter.mjs";
 import { appendBeadComment, approvalForSpecHash, rebuildStateFromBeadComments, verifyBeadsStore } from "./beads.mjs";
-import { ensureDir, pathExists, readJson, writeJson, appendJsonl, removePath } from "./fs.mjs";
+import { ensureDir, pathExists, readJson, writeJson, appendJsonl, removePath, listFilesRecursive } from "./fs.mjs";
 import {
   buildScopeLockedDiffArtifact,
   captureSnapshot,
@@ -15,7 +16,8 @@ import {
   resolveBaseSha,
 } from "./git.mjs";
 import { assertCommandsAllowed, assertOwnedPaths, scanPrivacyInPaths } from "./guardrails.mjs";
-import { sha256Json } from "./hash.mjs";
+import { sha256Json, sha256Text } from "./hash.mjs";
+import { acquireLock } from "./lock.mjs";
 import { ok, result } from "./output.mjs";
 import {
   projectConfigPath,
@@ -24,7 +26,7 @@ import {
   runStatePath
 } from "./paths.mjs";
 import { classifyProviderFailure, parseWorkerReport, runProviderCommand } from "./provider.mjs";
-import { sanitizeIssueForPrompt, sanitizePromptText, slugifyTitle } from "./sanitize.mjs";
+import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
 import { validateReviewReport, validateWorkerReport } from "./validate.mjs";
 
@@ -32,19 +34,54 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+async function writeJsonAtomic(filePath, value) {
+  await ensureDir(path.dirname(filePath));
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await rename(tmpPath, filePath);
+}
+
 function shortSpecHash(specHash) {
   return specHash.slice(0, 8);
 }
 
 function neutralNames(issueTitle, specHash) {
-  const slug = slugifyTitle(issueTitle);
+  const cleanTitle = sanitizeTeamFacingText(issueTitle);
+  const slug = slugifyTitle(cleanTitle);
   const suffix = shortSpecHash(specHash);
   return {
     slug,
     branch: `relay/${slug}-${suffix}`,
-    commitMessage: `relay: ${slug} ${suffix}`,
-    prTitle: `relay: ${slug} ${suffix}`
+    commitMessage: sanitizeTeamFacingText(`relay ${cleanTitle} ${suffix}`),
+    prTitle: sanitizeTeamFacingText(`relay ${cleanTitle} ${suffix}`)
   };
+}
+
+function computeSpecHash(bead) {
+  return sha256Json({
+    description: bead.description || "",
+    design: bead.design || "",
+    acceptance: bead.acceptance_criteria || bead.acceptance || "",
+    dependencies: bead.dependencies || [],
+    riskClass: bead.riskClass || "normal-code",
+    ownedPaths: bead.ownedPaths || ["."],
+    gateGroups: bead.gateGroups || []
+  });
+}
+
+function defaultPlanReview(config, riskClass, specHash) {
+  return {
+    completed: false,
+    findingsResolved: false,
+    reviewers: [],
+    findings: [],
+    approvalRequired: (config.planApprovalRiskClasses || []).includes(riskClass || "normal-code"),
+    approvalSpecHash: specHash
+  };
+}
+
+function lockPathForBead(projectRoot, beadId) {
+  return path.join(projectStateRoot(projectRoot), "locks", `${beadId}.lock.json`);
 }
 
 function defaultConfig(adapterName, projectRoot) {
@@ -148,7 +185,7 @@ async function writeState(projectRoot, beadId, patch) {
       updatedAt: nowIso()
     }
   };
-  await writeJson(filePath, next);
+  await writeJsonAtomic(filePath, next);
   return next;
 }
 
@@ -175,10 +212,46 @@ async function appendCheckpoint({ projectRoot, beadId, env, label, statePatch, d
   });
 }
 
+async function readTextIfExists(filePath) {
+  return readFile(filePath, "utf8").catch(() => "");
+}
+
+async function sha256Files(rootDir) {
+  if (!(await pathExists(rootDir))) {
+    return "";
+  }
+  const files = await listFilesRecursive(rootDir);
+  const sections = [];
+  for (const filePath of files) {
+    sections.push(`${path.relative(rootDir, filePath)}:${sha256Text(await readTextIfExists(filePath))}`);
+  }
+  return sha256Text(sections.join("\n"));
+}
+
+async function runGitText(config, cwd, args) {
+  const run = await runProviderCommand({
+    providerName: `git:${args.join(" ")}`,
+    command: config.git.command,
+    args,
+    cwd,
+    env: config.git.env || {},
+    timeoutMs: 30000
+  });
+  if (run.code !== 0) {
+    return "";
+  }
+  return (run.stdout || "").trim();
+}
+
 async function captureControlPlaneSnapshot(config, projectRoot, worktreePath) {
   const snapshot = {
     mainStatus: await getGitStatus(config, config.mainCheckoutRoot || projectRoot),
-    remotes: await getGitRemotes(config, config.mainCheckoutRoot || projectRoot)
+    mainHead: await getGitHead(config, config.mainCheckoutRoot || projectRoot),
+    mainBranch: await getGitBranch(config, config.mainCheckoutRoot || projectRoot),
+    remotes: await getGitRemotes(config, config.mainCheckoutRoot || projectRoot),
+    refs: await runGitText(config, config.mainCheckoutRoot || projectRoot, ["show-ref", "--head"]),
+    gitConfigHash: sha256Text(await readTextIfExists(path.join(config.mainCheckoutRoot || projectRoot, ".git", "config"))),
+    hooksHash: await sha256Files(path.join(config.mainCheckoutRoot || projectRoot, ".git", "hooks"))
   };
   if (worktreePath && await pathExists(worktreePath)) {
     snapshot.worktreeHead = await getGitHead(config, worktreePath);
@@ -196,8 +269,23 @@ function assertStableControlPlane(before, after, label, {
   if (!allowMainStatusChange && before.mainStatus !== after.mainStatus) {
     throw new Error(`main checkout drift detected during ${label}`);
   }
+  if (before.mainHead !== after.mainHead) {
+    throw new Error(`main checkout HEAD drift detected during ${label}`);
+  }
+  if (before.mainBranch !== after.mainBranch) {
+    throw new Error(`main checkout branch drift detected during ${label}`);
+  }
   if (!allowRemoteChange && before.remotes !== after.remotes) {
     throw new Error(`remote mutation detected during ${label}`);
+  }
+  if (before.refs !== after.refs) {
+    throw new Error(`ref mutation detected during ${label}`);
+  }
+  if (before.gitConfigHash !== after.gitConfigHash) {
+    throw new Error(`git config mutation detected during ${label}`);
+  }
+  if (before.hooksHash !== after.hooksHash) {
+    throw new Error(`git hooks mutation detected during ${label}`);
   }
   if ("worktreeHead" in before && !allowHeadChange && before.worktreeHead !== after.worktreeHead) {
     throw new Error(`worktree HEAD drift detected during ${label}`);
@@ -210,6 +298,72 @@ function assertStableControlPlane(before, after, label, {
 function providerCommandFromConfig(config, providerName) {
   const provider = config.providers?.[providerName];
   return provider?.command ? provider : null;
+}
+
+function providerVendor(providerName, providerConfig) {
+  return providerConfig?.vendor || providerName;
+}
+
+function providerStrength(providerConfig) {
+  return providerConfig?.strength || "strong";
+}
+
+async function createProviderPathShim({ beadId, providerName, allowReadOnlyGit = false }) {
+  const shimDir = await mkdtemp(path.join(os.tmpdir(), `agent-relay-shim-${beadId}-${providerName}-`));
+  const denyBody = (name) => `#!/usr/bin/env bash\necho "${name} is blocked by agent-relay supervision" >&2\nexit 1\n`;
+  await writeFile(path.join(shimDir, "bd"), denyBody("bd"), { mode: 0o755 });
+  await writeFile(path.join(shimDir, "gh"), denyBody("gh"), { mode: 0o755 });
+  const gitBody = allowReadOnlyGit
+    ? `#!/usr/bin/env bash\ncase "$1" in\n  rev-parse|show-ref|symbolic-ref|status|config|remote)\n    command git "$@"\n    ;;\n  *)\n    echo "git mutation is blocked by agent-relay supervision" >&2\n    exit 1\n    ;;\nesac\n`
+    : denyBody("git");
+  await writeFile(path.join(shimDir, "git"), gitBody, { mode: 0o755 });
+  return shimDir;
+}
+
+async function buildProviderExecutionEnv({ providerConfig, beadId, providerName, mode }) {
+  const pathValue = providerConfig.env?.PATH || process.env.PATH;
+  if (!pathValue) {
+    throw new Error(`provider containment is unavailable for ${providerName}`);
+  }
+  const shimDir = await createProviderPathShim({
+    beadId,
+    providerName,
+    allowReadOnlyGit: mode === "read-only"
+  });
+  const env = {
+    ...(providerConfig.env || {}),
+    PATH: `${shimDir}:${pathValue}`
+  };
+  delete env.BEADS_DIR;
+  delete env.AGENT_RELAY_BEADS_READONLY;
+  return env;
+}
+
+function candidateReviewProviders({ config, providerNames, requiredVendors, excludedVendor = null, strongOnly = false }) {
+  const candidates = [];
+  const seenVendors = new Set();
+  for (const providerName of providerNames) {
+    const providerConfig = providerCommandFromConfig(config, providerName);
+    if (!providerConfig) {
+      continue;
+    }
+    const vendor = providerVendor(providerName, providerConfig);
+    if (excludedVendor && vendor === excludedVendor) {
+      continue;
+    }
+    if (strongOnly && providerStrength(providerConfig) !== "strong") {
+      continue;
+    }
+    if (seenVendors.has(vendor)) {
+      continue;
+    }
+    seenVendors.add(vendor);
+    candidates.push({ providerName, providerConfig, vendor });
+  }
+  return {
+    candidates,
+    hasQuorum: candidates.length >= requiredVendors
+  };
 }
 
 async function runCommandChecked({
@@ -320,12 +474,7 @@ function buildCorrectionReason(findings) {
 
 function buildPlanState({ projectRoot, adapterName, bead, config }) {
   const sanitizedIssue = sanitizeIssueForPrompt(bead);
-  const specHash = sha256Json({
-    description: bead.description || "",
-    design: bead.design || "",
-    acceptance: bead.acceptance_criteria || bead.acceptance || "",
-    dependencies: bead.dependencies || []
-  });
+  const specHash = computeSpecHash(bead);
   const names = neutralNames(sanitizedIssue.title, specHash);
   return {
     beadId: bead.id,
@@ -349,14 +498,7 @@ function buildPlanState({ projectRoot, adapterName, bead, config }) {
     },
     correctionRounds: 0,
     pendingCorrection: null,
-    planReview: {
-      completed: false,
-      findingsResolved: false,
-      reviewers: [],
-      findings: [],
-      approvalRequired: (config.planApprovalRiskClasses || []).includes(bead.riskClass || "normal-code"),
-      approvalSpecHash: specHash
-    },
+    planReview: defaultPlanReview(config, bead.riskClass || "normal-code", specHash),
     reviewState: {
       requiredVendors: 2,
       completedVendors: [],
@@ -371,17 +513,52 @@ function buildPlanState({ projectRoot, adapterName, bead, config }) {
 
 async function ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config }) {
   const statePath = runStatePath(projectRoot, beadId);
-  if (await pathExists(statePath)) {
-    return readJson(statePath);
-  }
-  const beads = verifyBeadsStore({ adapter, env, beadId, claim: true, alreadyClaimed: false });
-  const policy = computeReviewVendorPolicy(adapter, beads.bead.riskClass);
-  const state = buildPlanState({
+  const hasLocalState = await pathExists(statePath);
+  const beads = verifyBeadsStore({ adapter, env, beadId, claim: false, alreadyClaimed: true });
+  const livePlan = buildPlanState({
     projectRoot,
     adapterName,
     bead: { ...beads.bead, _adapterRiskClasses: adapter.riskClasses },
     config
   });
+  if (hasLocalState) {
+    const current = await readJson(statePath);
+    if (current.specHash !== livePlan.specHash) {
+      return writeState(projectRoot, beadId, {
+        ...current,
+        ...livePlan,
+        phase: "planning",
+        planReview: defaultPlanReview(config, livePlan.riskClass, livePlan.specHash),
+        reviewState: {
+          requiredVendors: computeReviewVendorPolicy(adapter, livePlan.riskClass).reviewVendors,
+          completedVendors: [],
+          findingsResolved: false
+        },
+        correctionRounds: 0,
+        pendingCorrection: null,
+        delivery: { prUrl: null }
+      });
+    }
+    return writeState(projectRoot, beadId, {
+      ...current,
+      issue: livePlan.issue,
+      riskClass: livePlan.riskClass,
+      ownedPaths: livePlan.ownedPaths,
+      gateGroups: livePlan.gateGroups,
+      specHash: livePlan.specHash,
+      neutralNames: livePlan.neutralNames,
+      planReview: {
+        ...(current.planReview || defaultPlanReview(config, livePlan.riskClass, livePlan.specHash)),
+        approvalRequired: livePlan.planReview.approvalRequired,
+        approvalSpecHash: livePlan.specHash
+      }
+    });
+  }
+  if (!beads.bead.claimed) {
+    verifyBeadsStore({ adapter, env, beadId, claim: true, alreadyClaimed: false });
+  }
+  const policy = computeReviewVendorPolicy(adapter, beads.bead.riskClass);
+  const state = livePlan;
   state.reviewState.requiredVendors = policy.reviewVendors;
   const planned = await writeState(projectRoot, beadId, {
     ...state,
@@ -404,14 +581,24 @@ async function ensurePlannedState({ projectRoot, adapterName, beadId, adapter, e
 async function loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config }) {
   const localPath = runStatePath(projectRoot, beadId);
   if (await pathExists(localPath)) {
-    return readJson(localPath);
+    return ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   }
   const beads = verifyBeadsStore({ adapter, env, beadId, claim: false, alreadyClaimed: true });
+  const liveState = buildPlanState({
+    projectRoot,
+    adapterName,
+    bead: { ...beads.bead, _adapterRiskClasses: adapter.riskClasses },
+    config
+  });
+  liveState.reviewState.requiredVendors = computeReviewVendorPolicy(adapter, beads.bead.riskClass).reviewVendors;
   const recovered = rebuildStateFromBeadComments(beads.checkpoints);
   if (!recovered.beadId) {
     return ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   }
-  const state = await writeState(projectRoot, beadId, recovered);
+  const state = await writeState(projectRoot, beadId, {
+    ...liveState,
+    ...recovered
+  });
   await appendLedger(projectRoot, beadId, "state-recovered", { source: "bead-comments" });
   return state;
 }
@@ -475,6 +662,26 @@ async function writeProviderPrompt({ projectRoot, beadId, fileName, contents }) 
   return filePath;
 }
 
+async function withBeadLock({ projectRoot, beadId, action }, fn) {
+  const lock = await acquireLock({
+    lockPath: lockPathForBead(projectRoot, beadId),
+    owner: `${action}:${process.pid}`,
+    staleMs: 2000,
+    heartbeatMs: 200
+  });
+  if (!lock.acquired) {
+    return result("human-action-required", action, {
+      reason: `bead ${beadId} is locked by another run`,
+      lock: lock.currentLock || null
+    });
+  }
+  try {
+    return await fn();
+  } finally {
+    await lock.release();
+  }
+}
+
 function buildCoderPrompt({ state, gateGroupNames, corrective, reason }) {
   const issue = state.issue;
   const lines = [
@@ -486,7 +693,7 @@ function buildCoderPrompt({ state, gateGroupNames, corrective, reason }) {
     `Dependencies: ${issue.dependencies.map((dependency) => `${dependency.id}:${dependency.status}`).join(", ") || "none"}`,
     `Owned paths: ${state.ownedPaths.join(", ")}`,
     `Prohibited actions: ${state.prohibitedActions.join(", ")}`,
-    `Gate groups: ${gateGroupNames.join(", ")}`,
+    `Gate groups: ${gateGroupNames.length > 0 ? gateGroupNames.join(", ") : "none"}`,
     "Output schema: JSON object with required status, summary, ownedPaths, commandsAttempted, changedPaths, and optional gatesClaimed, artifacts.",
     "Worker constraints: use BEADS_DIR only for readonly context, do not write Beads, Git, remotes, or PRs.",
     "Do not read or modify files outside the assigned worktree."
@@ -522,6 +729,43 @@ function buildReviewPrompt({ state, artifactPath, reviewVendor, strongReview }) 
     `Strong review required: ${strongReview ? "yes" : "no"}`,
     "Return JSON with status, summary, findings, commandsAttempted."
   ].join("\n");
+}
+
+async function validateVerifiedDiff({ adapter, config, state, projectRoot, beadId }) {
+  const beforeSnapshot = await snapshotForState(state);
+  const verifiedArtifactPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, "delivery-verified-diff.md");
+  const diffArtifact = await buildScopeLockedDiffArtifact({
+    worktreePath: state.worktreePath,
+    beforeSnapshot,
+    filePath: verifiedArtifactPath
+  });
+  const verifiedArtifactHash = sha256Text(await readFile(verifiedArtifactPath, "utf8"));
+  if (verifiedArtifactHash !== state.reviewState?.reviewedArtifactHash) {
+    throw new Error("current diff no longer matches the reviewed artifact");
+  }
+  assertOwnedPaths({
+    ownedPaths: state.ownedPaths,
+    changedPaths: diffArtifact.changedPaths,
+    protectedPaths: adapter.controlPlane.protectedPaths,
+    mode: config.pluginMaintenanceMode ? "plugin-maintenance" : "default"
+  });
+  const privacyFindings = await scanPrivacyInPaths(state.worktreePath, diffArtifact.changedPaths);
+  if (privacyFindings.length > 0) {
+    throw new Error("privacy or attribution findings detected before delivery");
+  }
+  return {
+    artifactPath: verifiedArtifactPath,
+    artifactHash: verifiedArtifactHash,
+    changedPaths: diffArtifact.changedPaths
+  };
+}
+
+function validateTeamFacingDelivery({ state, prBody, config }) {
+  const providerNames = Object.keys(config.providers || {});
+  assertTeamFacingTextClean(state.branch, { beadId: state.beadId, providerNames });
+  assertTeamFacingTextClean(state.neutralNames.commitMessage, { beadId: state.beadId, providerNames });
+  assertTeamFacingTextClean(state.neutralNames.prTitle, { beadId: state.beadId, providerNames });
+  assertTeamFacingTextClean(prBody, { beadId: state.beadId, providerNames });
 }
 
 async function runGateGroupsChecked({ adapter, config, projectRoot, worktreePath, gateName, gateNames, env }) {
@@ -565,15 +809,26 @@ async function runGateGroupsChecked({ adapter, config, projectRoot, worktreePath
 
 async function runPlanReview({ projectRoot, beadId, state, config, adapter, env }) {
   const policy = computeReviewVendorPolicy(adapter, state.riskClass);
-  const vendors = uniqueProviders(config.reviewProviders || []).filter((providerName) => providerCommandFromConfig(config, providerName));
-  if (vendors.length < policy.reviewVendors) {
+  const { candidates, hasQuorum } = candidateReviewProviders({
+    config,
+    providerNames: uniqueProviders(config.reviewProviders || []),
+    requiredVendors: policy.reviewVendors,
+    strongOnly: policy.strongReviewersOnly
+  });
+  if (!hasQuorum) {
     return result("provider-quorum-unavailable", "plan", {
-      reason: `need ${policy.reviewVendors} distinct review vendors, found ${vendors.length}`
+      reason: `need ${policy.reviewVendors} distinct review vendors, found ${candidates.length}`
     });
   }
   const findings = [];
-  for (const providerName of vendors.slice(0, policy.reviewVendors)) {
-    const providerConfig = providerCommandFromConfig(config, providerName);
+  const specCwd = await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-${beadId}-`));
+  for (const { providerName, providerConfig, vendor } of candidates) {
+    const providerEnv = await buildProviderExecutionEnv({
+      providerConfig,
+      beadId,
+      providerName,
+      mode: "read-only"
+    });
     const promptPath = await writeProviderPrompt({
       projectRoot,
       beadId,
@@ -586,28 +841,29 @@ async function runPlanReview({ projectRoot, beadId, state, config, adapter, env 
     const run = await runCommandChecked({
       config,
       projectRoot,
-      cwd: projectRoot,
+      cwd: specCwd,
       command: providerConfig.command,
       args: [...(providerConfig.args || []), promptPath],
-      env: {
-        ...(providerConfig.env || {}),
-        BEADS_DIR: env.BEADS_DIR,
-        AGENT_RELAY_BEADS_READONLY: "1"
-      },
+      env: providerEnv,
       timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
       label: `plan-review:${providerName}`
     });
     if (run.code !== 0) {
-      return result("provider-quorum-unavailable", "plan", {
-        provider: providerName,
-        classification: classifyProviderFailure(run)
-      });
+      continue;
     }
     const report = validateReviewReport(parseWorkerReport(run.stdout));
     assertCommandsAllowed(report.commandsAttempted);
     const outputPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, `plan-review-${providerName}.json`);
     await writeJson(outputPath, report);
-    findings.push({ provider: providerName, report, outputPath });
+    findings.push({ provider: providerName, vendor, report, outputPath });
+    if (findings.length >= policy.reviewVendors) {
+      break;
+    }
+  }
+  if (findings.length < policy.reviewVendors) {
+    return result("provider-quorum-unavailable", "plan", {
+      reason: `successful plan-review vendor quorum absent; need ${policy.reviewVendors}, found ${findings.length}`
+    });
   }
   const findingsResolved = findings.every((item) => item.report.status === "success" && item.report.findings.length === 0);
   const nextState = await writeState(projectRoot, beadId, {
@@ -748,6 +1004,12 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
     let correctionRounds = state.correctionRounds || 0;
     let correctiveReason = state.pendingCorrection || "";
     while (true) {
+      const providerEnv = await buildProviderExecutionEnv({
+        providerConfig,
+        beadId,
+        providerName,
+        mode: "implementation"
+      });
       const promptPath = await writeProviderPrompt({
         projectRoot,
         beadId,
@@ -766,11 +1028,7 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
         worktreePath: state.worktreePath,
         command: providerConfig.command,
         args: [...(providerConfig.args || []), promptPath],
-        env: {
-          ...(providerConfig.env || {}),
-          BEADS_DIR: env.BEADS_DIR,
-          AGENT_RELAY_BEADS_READONLY: "1"
-        },
+        env: providerEnv,
         timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
         label: `coder:${providerName}`
       });
@@ -838,6 +1096,40 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
         break;
       }
       assertCommandsAllowed(report.commandsAttempted);
+      if (report.status === "provider-failure") {
+        const classification = classifyProviderFailure({
+          stdout: "",
+          stderr: report.summary,
+          signal: null,
+          timedOut: false
+        });
+        const diffArtifact = await buildScopeLockedDiffArtifact({
+          worktreePath: state.worktreePath,
+          beforeSnapshot: baselineSnapshot,
+          filePath: path.join(projectStateRoot(projectRoot), "artifacts", beadId, `implement-${providerName}-provider-failure.md`)
+        });
+        await appendCheckpoint({
+          projectRoot,
+          beadId,
+          env,
+          label: "coder-provider-failure",
+          statePatch: {
+            providerCursor: { ...(state.providerCursor || {}), coderIndex: providerIndex },
+            dirtyWorktree: diffArtifact.changedPaths.length > 0
+          },
+          details: {
+            provider: providerName,
+            classification,
+            changedPaths: diffArtifact.changedPaths,
+            summary: report.summary
+          }
+        });
+        if (classification === "handoff-after-retry" && serviceRetries < 1) {
+          serviceRetries += 1;
+          continue;
+        }
+        break;
+      }
       const diffArtifact = await buildScopeLockedDiffArtifact({
         worktreePath: state.worktreePath,
         beforeSnapshot: baselineSnapshot,
@@ -954,23 +1246,29 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
 
 async function runReviewer({ projectRoot, beadId, state, config, adapter, env }) {
   const policy = computeReviewVendorPolicy(adapter, state.riskClass);
-  const vendors = [];
-  for (const providerName of config.reviewProviders || []) {
-    if (providerName === state.lastCoder) {
-      continue;
-    }
-    if (providerCommandFromConfig(config, providerName)) {
-      vendors.push(providerName);
-    }
-  }
-  if (vendors.length < policy.reviewVendors) {
+  const coderConfig = providerCommandFromConfig(config, state.lastCoder);
+  const coderVendor = coderConfig ? providerVendor(state.lastCoder, coderConfig) : null;
+  const { candidates, hasQuorum } = candidateReviewProviders({
+    config,
+    providerNames: uniqueProviders(config.reviewProviders || []),
+    requiredVendors: policy.reviewVendors,
+    excludedVendor: coderVendor,
+    strongOnly: policy.strongReviewersOnly
+  });
+  if (!hasQuorum) {
     return result("provider-quorum-unavailable", "review", {
-      reason: `need ${policy.reviewVendors} distinct review vendors, found ${vendors.length}`
+      reason: `need ${policy.reviewVendors} distinct review vendors, found ${candidates.length}`
     });
   }
   const findings = [];
-  for (const providerName of vendors.slice(0, policy.reviewVendors)) {
-    const providerConfig = providerCommandFromConfig(config, providerName);
+  for (const { providerName, providerConfig, vendor } of candidates) {
+    const providerEnv = await buildProviderExecutionEnv({
+      providerConfig,
+      beadId,
+      providerName,
+      mode: "read-only"
+    });
+    const beforeSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay"] });
     const promptPath = await writeProviderPrompt({
       projectRoot,
       beadId,
@@ -989,25 +1287,30 @@ async function runReviewer({ projectRoot, beadId, state, config, adapter, env })
       worktreePath: state.worktreePath,
       command: providerConfig.command,
       args: [...(providerConfig.args || []), promptPath],
-      env: {
-        ...(providerConfig.env || {}),
-        BEADS_DIR: env.BEADS_DIR,
-        AGENT_RELAY_BEADS_READONLY: "1"
-      },
+      env: providerEnv,
       timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
       label: `reviewer:${providerName}`
     });
     if (run.code !== 0) {
-      return result("provider-quorum-unavailable", "review", {
-        provider: providerName,
-        classification: classifyProviderFailure(run)
-      });
+      continue;
+    }
+    const afterSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay"] });
+    if (sha256Json(beforeSnapshot) !== sha256Json(afterSnapshot)) {
+      throw new Error(`reviewer mutated worktree contents during ${providerName}`);
     }
     const report = validateReviewReport(parseWorkerReport(run.stdout));
     assertCommandsAllowed(report.commandsAttempted);
     const outputPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, `review-${providerName}.json`);
     await writeJson(outputPath, report);
-    findings.push({ provider: providerName, report, outputPath });
+    findings.push({ provider: providerName, vendor, report, outputPath });
+    if (findings.length >= policy.reviewVendors) {
+      break;
+    }
+  }
+  if (findings.length < policy.reviewVendors) {
+    return result("provider-quorum-unavailable", "review", {
+      reason: `successful review vendor quorum absent; need ${policy.reviewVendors}, found ${findings.length}`
+    });
   }
   return ok("review", { findings, policy });
 }
@@ -1082,13 +1385,22 @@ async function deliverReviewedWork({ projectRoot, beadId, state, config, adapter
       gateResults
     });
   }
+  const verifiedDiff = await validateVerifiedDiff({
+    adapter,
+    config,
+    state,
+    projectRoot,
+    beadId
+  });
+  const prBody = renderPullRequestBody({ state, reviewFindings });
+  validateTeamFacingDelivery({ state, prBody, config });
   const stageRun = await runCommandChecked({
     config,
     projectRoot,
     cwd: state.worktreePath,
     worktreePath: state.worktreePath,
     command: config.git.command,
-    args: ["add", "--", ...changedPaths],
+    args: ["add", "--", ...verifiedDiff.changedPaths],
     env: config.git.env || {},
     timeoutMs: 30000,
     label: "git-add-explicit"
@@ -1134,7 +1446,7 @@ async function deliverReviewedWork({ projectRoot, beadId, state, config, adapter
     throw new Error(`git push failed: ${pushRun.stderr || pushRun.stdout}`);
   }
   const prBodyPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, "pull-request-body.md");
-  await writeFile(prBodyPath, `${renderPullRequestBody({ state, reviewFindings })}\n`, "utf8");
+  await writeFile(prBodyPath, `${prBody}\n`, "utf8");
   const prRun = await runCommandChecked({
     config,
     projectRoot,
@@ -1167,6 +1479,12 @@ async function deliverReviewedWork({ projectRoot, beadId, state, config, adapter
     phase: "complete",
     dirtyWorktree: worktreeStatus.length > 0,
     gateResults,
+    latestChangedPaths: verifiedDiff.changedPaths,
+    latestDiffArtifact: verifiedDiff.artifactPath,
+    reviewState: {
+      ...(state.reviewState || {}),
+      reviewedArtifactHash: verifiedDiff.artifactHash
+    },
     delivery: {
       prUrl
     }
@@ -1217,7 +1535,7 @@ export async function setup({ projectRoot, adapterName }) {
   });
 }
 
-export async function plan({ projectRoot, adapterName, beadId, env = process.env }) {
+async function planUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName);
   const state = await ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
@@ -1249,7 +1567,7 @@ export async function status({ projectRoot, beadId }) {
   return ok("status", { state, ledger });
 }
 
-export async function run({ projectRoot, adapterName, beadId, env = process.env }) {
+async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName);
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
@@ -1262,7 +1580,7 @@ export async function run({ projectRoot, adapterName, beadId, env = process.env 
   return executeCoder({ projectRoot, beadId, state, config, adapter, env });
 }
 
-export async function review({ projectRoot, adapterName, beadId, env = process.env }) {
+async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName);
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
@@ -1276,6 +1594,7 @@ export async function review({ projectRoot, adapterName, beadId, env = process.e
     return reviewResult;
   }
   const findings = reviewResult.findings;
+  const reviewedArtifactHash = sha256Text(await readFile(state.latestDiffArtifact, "utf8"));
   await appendCheckpoint({
     projectRoot,
     beadId,
@@ -1286,7 +1605,8 @@ export async function review({ projectRoot, adapterName, beadId, env = process.e
       reviewState: {
         requiredVendors: reviewResult.policy.reviewVendors,
         completedVendors: findings.map((item) => item.provider),
-        findingsResolved: findings.every((item) => item.report.status === "success")
+        findingsResolved: findings.every((item) => item.report.status === "success"),
+        reviewedArtifactHash
       }
     },
     details: { findings: findings.map((item) => ({ provider: item.provider, status: item.report.status })) }
@@ -1297,7 +1617,8 @@ export async function review({ projectRoot, adapterName, beadId, env = process.e
     reviewState: {
       requiredVendors: reviewResult.policy.reviewVendors,
       completedVendors: findings.map((item) => item.provider),
-      findingsResolved: findings.every((item) => item.report.status === "success")
+      findingsResolved: findings.every((item) => item.report.status === "success"),
+      reviewedArtifactHash
     }
   });
   const needsFix = findings.some((item) => item.report.status === "needs-fix" || item.report.findings.length > 0);
@@ -1332,7 +1653,11 @@ export async function review({ projectRoot, adapterName, beadId, env = process.e
       },
       details: { findings: findings.map((item) => ({ provider: item.provider, summary: item.report.summary })) }
     });
-    return run({ projectRoot, adapterName, beadId, env });
+    const rerun = await runUnlocked({ projectRoot, adapterName, beadId, env });
+    if (!rerun.ok) {
+      return rerun;
+    }
+    return reviewUnlocked({ projectRoot, adapterName, beadId, env });
   }
   return deliverReviewedWork({ projectRoot, beadId, state, config, adapter, env, reviewFindings: findings });
 }
@@ -1356,7 +1681,7 @@ export async function gates({ projectRoot, adapterName, beadId, gateName, env = 
     : ok("gates", { results });
 }
 
-export async function resume({ projectRoot, adapterName, beadId, env = process.env }) {
+async function resumeUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName);
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
@@ -1366,12 +1691,12 @@ export async function resume({ projectRoot, adapterName, beadId, env = process.e
   }
   state = planReady.state;
   if (state.phase === "reviewing" || state.phase === "delivering") {
-    return review({ projectRoot, adapterName, beadId, env });
+    return reviewUnlocked({ projectRoot, adapterName, beadId, env });
   }
-  return run({ projectRoot, adapterName, beadId, env });
+  return runUnlocked({ projectRoot, adapterName, beadId, env });
 }
 
-export async function cleanup({ projectRoot, adapterName = "example-app", beadId }) {
+async function cleanupUnlocked({ projectRoot, adapterName = "example-app", beadId }) {
   const { config } = await ensureProjectState(projectRoot, adapterName);
   const state = await readJson(runStatePath(projectRoot, beadId));
   if (state.phase !== "complete") {
@@ -1399,4 +1724,24 @@ export async function cleanup({ projectRoot, adapterName = "example-app", beadId
       artifacts: path.join(projectStateRoot(projectRoot), "artifacts", beadId)
     }
   });
+}
+
+export async function plan(args) {
+  return withBeadLock({ projectRoot: args.projectRoot, beadId: args.beadId, action: "plan" }, () => planUnlocked(args));
+}
+
+export async function run(args) {
+  return withBeadLock({ projectRoot: args.projectRoot, beadId: args.beadId, action: "run" }, () => runUnlocked(args));
+}
+
+export async function review(args) {
+  return withBeadLock({ projectRoot: args.projectRoot, beadId: args.beadId, action: "review" }, () => reviewUnlocked(args));
+}
+
+export async function resume(args) {
+  return withBeadLock({ projectRoot: args.projectRoot, beadId: args.beadId, action: "resume" }, () => resumeUnlocked(args));
+}
+
+export async function cleanup(args) {
+  return withBeadLock({ projectRoot: args.projectRoot, beadId: args.beadId, action: "cleanup" }, () => cleanupUnlocked(args));
 }

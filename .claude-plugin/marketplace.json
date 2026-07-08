@@ -6,7 +6,7 @@
       "name": "agent-relay",
       "source": {
         "source": "local",
-        "path": "./plugins/agent-relay"
+        "path": "../plugins/agent-relay"
       },
       "defaultEnabled": false
     }

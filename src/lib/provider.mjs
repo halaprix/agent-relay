@@ -57,6 +57,7 @@ export async function runProviderCommand({
   const stdoutPath = path.join(captureDir, "stdout.log");
   const stderrPath = path.join(captureDir, "stderr.log");
   return new Promise((resolve) => {
+    let settled = false;
     const child = spawn(resolvedCommand, resolvedArgs, {
       cwd,
       env: {
@@ -66,15 +67,53 @@ export async function runProviderCommand({
         AGENT_RELAY_STDOUT_FILE: stdoutPath,
         AGENT_RELAY_STDERR_FILE: stderrPath
       },
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    const resolveResult = (payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      clearTimeout(finalTimer);
+      resolve(payload);
+    };
+    const killProcessGroup = (signal) => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      killProcessGroup("SIGTERM");
     }, timeoutMs);
+    const killTimer = setTimeout(() => {
+      if (timedOut) {
+        killProcessGroup("SIGKILL");
+      }
+    }, timeoutMs + 250);
+    const finalTimer = setTimeout(() => {
+      Promise.all([
+        stdout ? Promise.resolve(stdout) : readFile(stdoutPath, "utf8").catch(() => ""),
+        stderr ? Promise.resolve(stderr) : readFile(stderrPath, "utf8").catch(() => "")
+      ]).then(([capturedStdout, capturedStderr]) =>
+        resolveResult({
+          providerName,
+          code: 1,
+          signal: "SIGKILL",
+          stdout: capturedStdout,
+          stderr: capturedStderr,
+          timedOut
+        })
+      );
+    }, timeoutMs + 1000);
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
     });
@@ -82,8 +121,7 @@ export async function runProviderCommand({
       stderr += chunk;
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({
+      resolveResult({
         providerName,
         code: 1,
         signal: null,
@@ -93,20 +131,19 @@ export async function runProviderCommand({
       });
     });
     child.on("close", (code, signal) => {
-      clearTimeout(timer);
       Promise.all([
         stdout ? Promise.resolve(stdout) : readFile(stdoutPath, "utf8").catch(() => ""),
         stderr ? Promise.resolve(stderr) : readFile(stderrPath, "utf8").catch(() => "")
-      ]).then(([capturedStdout, capturedStderr]) =>
-        resolve({
+      ]).then(([capturedStdout, capturedStderr]) => {
+        resolveResult({
           providerName,
           code: code ?? 1,
           signal,
           stdout: capturedStdout,
           stderr: capturedStderr,
           timedOut
-        })
-      );
+        });
+      });
     });
   });
 }

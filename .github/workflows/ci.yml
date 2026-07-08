@@ -16,16 +16,19 @@ jobs:
           node-version: 22
       - name: Install nothing
         run: npm --version
-      - name: Sync generated roles
-        run: node scripts/sync-roles.mjs
-      - name: Sync adapters
-        run: node scripts/sync-adapters.mjs
+      - name: Verify generated role and adapter artifacts
+        run: npm run check
+      - name: Regenerate tracked artifacts
+        run: |
+          set -eu
+          node scripts/sync-roles.mjs
+          node scripts/sync-adapters.mjs
+      - name: Assert generated artifacts are committed
+        run: git diff --exit-code -- .claude-plugin/agents .codex/agents .agents/agents .generated/adapters.json
       - name: Run Node tests
         run: npm test
       - name: Run lint-style validators
         run: npm run lint
-      - name: Validate role and adapter generation
-        run: npm run check
       - name: Validate Codex plugin
         run: npm run validate:codex-plugin
       - name: Validate Claude plugin
@@ -33,4 +36,4 @@ jobs:
       - name: Shell syntax
         run: |
           set -eu
-          find scripts -name '*.sh' -print0 | xargs -0 -r bash -n
+          find scripts -name '*.sh' -exec bash -n {} +

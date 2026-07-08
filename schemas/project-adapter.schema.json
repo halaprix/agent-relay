@@ -98,9 +98,46 @@
     "gates": {
       "type": "object",
       "required": [
+        "routing",
         "groups"
       ],
       "properties": {
+        "routing": {
+          "type": "object",
+          "required": [
+            "planReviewDefault",
+            "implementationDefault",
+            "implementationByRisk",
+            "deliveryDefault",
+            "deliveryByRisk",
+            "deliveryFull",
+            "humanApproval"
+          ],
+          "properties": {
+            "planReviewDefault": {
+              "$ref": "#/$defs/gateGroupList"
+            },
+            "implementationDefault": {
+              "$ref": "#/$defs/gateGroupList"
+            },
+            "implementationByRisk": {
+              "$ref": "#/$defs/riskGateMap"
+            },
+            "deliveryDefault": {
+              "$ref": "#/$defs/gateGroupList"
+            },
+            "deliveryByRisk": {
+              "$ref": "#/$defs/riskGateMap"
+            },
+            "deliveryFull": {
+              "$ref": "#/$defs/gateGroupList"
+            },
+            "humanApproval": {
+              "$ref": "#/$defs/gateGroupList"
+            }
+          },
+          "additionalProperties": false
+        },
         "groups": {
           "type": "object",
           "minProperties": 1,
@@ -192,6 +229,19 @@
       "items": {
         "type": "string",
         "minLength": 1
+      }
+    },
+    "gateGroupList": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "riskGateMap": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/gateGroupList"
       }
     },
     "gate": {

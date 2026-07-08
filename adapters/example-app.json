@@ -38,19 +38,50 @@
     "routing": {
       "planReviewDefault": [],
       "implementationDefault": [
-        "types-and-tests"
+        "sdk-package",
+        "app-package"
       ],
       "implementationByRisk": {
+        "documentation": [],
+        "normal-code": [
+          "sdk-package",
+          "app-package"
+        ],
+        "shared-infrastructure": [
+          "sdk-package",
+          "app-package"
+        ],
         "solidity-core": [
-          "types-and-tests",
+          "sdk-package",
+          "app-package",
           "solidity"
         ],
         "money-path": [
-          "types-and-tests"
+          "sdk-package",
+          "app-package"
+        ]
+      },
+      "deliveryDefault": [
+        "formatting",
+        "workspace-lint-check-types",
+        "sdk-package",
+        "app-package"
+      ],
+      "deliveryByRisk": {
+        "solidity-core": [
+          "formatting",
+          "workspace-lint-check-types",
+          "sdk-package",
+          "app-package",
+          "solidity"
         ]
       },
       "deliveryFull": [
-        "pre-push"
+        "formatting",
+        "workspace-lint-check-types",
+        "sdk-package",
+        "app-package",
+        "solidity"
       ],
       "humanApproval": [
         "browser-walkthroughs"
@@ -66,7 +97,7 @@
           ]
         }
       ],
-      "types-and-tests": [
+      "workspace-lint-check-types": [
         {
           "name": "workspace-lint-check-types",
           "command": [
@@ -75,6 +106,46 @@
             "run",
             "lint",
             "check-types"
+          ]
+        }
+      ],
+      "sdk-package": [
+        {
+          "name": "sdk-check-types",
+          "command": [
+            "pnpm",
+            "--filter",
+            "@example/sdk",
+            "check-types"
+          ]
+        },
+        {
+          "name": "sdk-test",
+          "command": [
+            "pnpm",
+            "--filter",
+            "@example/sdk",
+            "test"
+          ]
+        }
+      ],
+      "app-package": [
+        {
+          "name": "app-check-types",
+          "command": [
+            "pnpm",
+            "--filter",
+            "@example/app",
+            "check-types"
+          ]
+        },
+        {
+          "name": "app-test",
+          "command": [
+            "pnpm",
+            "--filter",
+            "@example/app",
+            "test"
           ]
         }
       ],
@@ -86,6 +157,14 @@
             "forge",
             "build"
           ]
+        },
+        {
+          "name": "forge-test",
+          "cwd": "packages/contracts",
+          "command": [
+            "forge",
+            "test"
+          ]
         }
       ],
       "browser-walkthroughs": [
@@ -93,25 +172,6 @@
           "name": "manual-browser-walkthrough",
           "humanOnly": true,
           "reason": "Browser walkthroughs require a supervised human or dedicated GUI runner."
-        }
-      ],
-      "pre-push": [
-        {
-          "name": "format",
-          "command": [
-            "pnpm",
-            "format"
-          ]
-        },
-        {
-          "name": "workspace-lint-check-types",
-          "command": [
-            "pnpm",
-            "turbo",
-            "run",
-            "lint",
-            "check-types"
-          ]
         }
       ]
     }

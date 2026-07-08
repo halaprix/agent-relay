@@ -35,7 +35,7 @@ Neutral supervisor
           <li>Plan, checkpoint, and pause for durable decisions.</li>
           <li>Run one owned workstream per isolated worktree.</li>
           <li>Re-run gates independently and review with distinct vendors.</li>
-          <li>Stop at a review-clean PR for human merge.</li>
+          <li>Stop at a review-clean PR for human merge, or pause when vendor quorum is unavailable.</li>
         </ol>
       </section>
       <section>
@@ -45,11 +45,13 @@ Neutral supervisor
           <li>Protected paths, blanket staging, remote mutation, and attribution are blocked.</li>
           <li>Dirty worktrees are preserved for inspection instead of being deleted automatically.</li>
           <li>Review-clean PR delivery runs only when delivery is configured; otherwise the run pauses for a human.</li>
+          <li>Version 0.1 is a local CLI/plugin package; a transient user service is optional future work, not a packaged requirement.</li>
         </ul>
       </section>
       <section>
         <h2>Setup</h2>
         <p>Install the plugin, then run <code>relay setup --adapter example-app</code> from the target project root.</p>
+        <p>Repo-local marketplace entries resolve through <code>plugins/agent-relay</code>. Private Pages publishing still depends on repository visibility and account plan support.</p>
       </section>
     </main>
   </body>

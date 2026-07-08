@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { ensureDir, readJson } from "./fs.mjs";
 import { repoPath } from "./paths.mjs";
 
@@ -137,7 +137,22 @@ export function normalizeRoleOutput(format, content) {
   };
 }
 
-export async function syncRoleBundles({ check = false } = {}) {
+function defaultRoleTargets() {
+  return {
+    claudeDir: repoPath(".claude-plugin", "agents"),
+    codexDir: repoPath(".codex", "agents"),
+    agyDir: repoPath(".agents", "agents")
+  };
+}
+
+async function assertExactFileContent(filePath, expected) {
+  const actual = await readFile(filePath, "utf8").catch(() => null);
+  if (actual !== expected) {
+    throw new Error(`generated role drift detected: ${filePath}`);
+  }
+}
+
+export async function syncRoleBundles({ check = false, targets = defaultRoleTargets() } = {}) {
   const roles = await loadRoleSpecs();
   const outputs = [];
   for (const role of roles) {
@@ -148,15 +163,21 @@ export async function syncRoleBundles({ check = false } = {}) {
       agy: renderAgyRole(role)
     });
   }
-  if (!check) {
-    await ensureDir(repoPath(".claude-plugin", "agents"));
-    await ensureDir(repoPath(".codex", "agents"));
-    await ensureDir(repoPath(".agents", "agents"));
+  if (check) {
     for (const output of outputs) {
-      await writeFile(repoPath(".claude-plugin", "agents", `${output.role}.md`), output.claude, "utf8");
-      await writeFile(repoPath(".codex", "agents", `${output.role}.toml`), output.codex, "utf8");
-      await writeFile(repoPath(".agents", "agents", `${output.role}.md`), output.agy, "utf8");
+      await assertExactFileContent(path.join(targets.claudeDir, `${output.role}.md`), output.claude);
+      await assertExactFileContent(path.join(targets.codexDir, `${output.role}.toml`), output.codex);
+      await assertExactFileContent(path.join(targets.agyDir, `${output.role}.md`), output.agy);
     }
+    return outputs;
+  }
+  await ensureDir(targets.claudeDir);
+  await ensureDir(targets.codexDir);
+  await ensureDir(targets.agyDir);
+  for (const output of outputs) {
+    await writeFile(path.join(targets.claudeDir, `${output.role}.md`), output.claude, "utf8");
+    await writeFile(path.join(targets.codexDir, `${output.role}.toml`), output.codex, "utf8");
+    await writeFile(path.join(targets.agyDir, `${output.role}.md`), output.agy, "utf8");
   }
   return outputs;
 }

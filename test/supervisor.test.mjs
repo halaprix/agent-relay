@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { repoPath, runStatePath } from "../src/lib/paths.mjs";
+import { execFile as execFileCallback } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { projectStateRoot, repoPath, runStatePath } from "../src/lib/paths.mjs";
 import { pathExists, removePath } from "../src/lib/fs.mjs";
 import { cleanup, doctor, gates, plan, resume, review, run, setup } from "../src/lib/supervisor.mjs";
 import {
@@ -17,6 +19,8 @@ import {
   seedRelayConfig,
   writeState
 } from "./helpers.mjs";
+
+const execFile = promisify(execFileCallback);
 
 function relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra = {} }) {
   return {
@@ -96,6 +100,25 @@ async function mutateBdStore(storePath, mutate) {
   mutate(store);
   await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
   return store;
+}
+
+async function runGitCommand(cwd, args) {
+  await execFile("git", args, { cwd });
+}
+
+async function createRealGitProjectFixture() {
+  const projectRoot = await createProjectFixture();
+  await rm(path.join(projectRoot, ".git"), { recursive: true, force: true });
+  await runGitCommand(projectRoot, ["init", "-b", "dev"]);
+  await runGitCommand(projectRoot, ["config", "user.name", "Relay Tester"]);
+  await runGitCommand(projectRoot, ["config", "user.email", "relay-tester@example.com"]);
+  await runGitCommand(projectRoot, ["add", "."]);
+  await runGitCommand(projectRoot, ["commit", "-m", "fixture"]);
+  const remoteRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-remote-"));
+  await runGitCommand(remoteRoot, ["init", "--bare"]);
+  await runGitCommand(projectRoot, ["remote", "add", "origin", remoteRoot]);
+  await runGitCommand(projectRoot, ["push", "-u", "origin", "dev"]);
+  return { projectRoot, remoteRoot };
 }
 
 test("setup writes local state, syncs roles, and marks .agents/agent-relay ignored locally", { timeout: 10000 }, async () => {
@@ -189,7 +212,7 @@ test("run creates an isolated worktree and executes the coder there", { timeout:
   const providerStore = JSON.parse(await readFile(providerStorePath, "utf8"));
   assert.equal(providerStore.calls.length, 1);
   assert.equal(providerStore.calls[0].cwd, result.state.worktreePath);
-  assert.match(providerStore.calls[0].prompt, /Gate groups: types-and-tests/);
+  assert.match(providerStore.calls[0].prompt, /Gate groups: none/);
   assert.doesNotMatch(providerStore.calls[0].prompt, /formatting|solidity/);
 });
 
@@ -731,6 +754,7 @@ test("review corrections return to the same coder and include consolidated findi
     }
   });
   const gitStorePath = await createFakeGitStore(projectRoot);
+  const ghStorePath = await createFakeGhStore();
   const gateStorePath = await createFakeGateStore([{ ok: true }, { ok: true }, { ok: true }, { ok: true }]);
   const shimDir = await createGateShimPath();
   const coderStore = await createFakeProviderStore([
@@ -761,7 +785,8 @@ test("review corrections return to the same coder and include consolidated findi
   ]);
   const reviewerStore = await createFakeProviderStore([
     successReviewStep(),
-    successReviewStep("missing guard", [{ severity: "high", title: "Need extra guard", file: "src/reviewable.ts" }])
+    successReviewStep("missing guard", [{ severity: "high", title: "Need extra guard", file: "src/reviewable.ts" }]),
+    successReviewStep("re-review clean")
   ]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
@@ -779,7 +804,20 @@ test("review corrections return to the same coder and include consolidated findi
         timeoutMs: 1000
       }
     },
-    reviewProviders: ["agy"]
+    reviewProviders: ["agy"],
+    github: {
+      command: repoPath("test", "fixtures", "fake-gh.mjs"),
+      env: {
+        FAKE_GH_STORE: ghStorePath
+      }
+    },
+    delivery: {
+      enabled: true,
+      identity: {
+        name: "Relay User",
+        email: "relay@example.com"
+      }
+    }
   });
   await seedRelayConfig(projectRoot, config);
   const runResult = await run({
@@ -793,7 +831,7 @@ test("review corrections return to the same coder and include consolidated findi
     projectRoot,
     adapterName: "example-app",
     beadId: "example-app-123",
-    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
   });
   assert.equal(reviewResult.ok, true);
   const coderCalls = JSON.parse(await readFile(coderStore, "utf8")).calls;
@@ -904,4 +942,141 @@ test("cleanup preserves dirty worktrees even when destructive cleanup is approve
   const cleanupResult = await cleanup({ projectRoot, adapterName: "example-app", beadId: "example-app-123" });
   assert.equal(cleanupResult.exitClass, "human-action-required");
   assert.match(cleanupResult.reason, /dirty or partially committed worktrees/);
+});
+
+test("run and resume reject a fresh concurrent bead lock", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const lockDir = path.join(projectStateRoot(projectRoot), "locks");
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(path.join(lockDir, "example-app-123.lock.json"), `${JSON.stringify({
+    token: "lock-token",
+    owner: "run:999",
+    pid: 999,
+    heartbeatAt: Date.now()
+  }, null, 2)}\n`, "utf8");
+
+  const runResult = await run({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123"
+  });
+  assert.equal(runResult.exitClass, "human-action-required");
+  assert.match(runResult.reason, /locked by another run/);
+
+  const resumeResult = await resume({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123"
+  });
+  assert.equal(resumeResult.exitClass, "human-action-required");
+  assert.match(resumeResult.reason, /locked by another run/);
+});
+
+test("review fails closed when a reviewer mutates a real git worktree", { timeout: 15000 }, async () => {
+  const { projectRoot } = await createRealGitProjectFixture();
+  const bdStorePath = await createFakeBdStore({
+    issues: {
+      "example-app-123": {
+        id: "example-app-123",
+        title: "Real git review",
+        description: "Use a real git worktree for mutation checks.",
+        design: "Reviewers must not mutate the worktree.",
+        acceptance_criteria: "Mutation is rejected.",
+        riskClass: "documentation",
+        dependencies: [],
+        claimed: false,
+        claimConflict: false
+      }
+    }
+  });
+  const gateStorePath = await createFakeGateStore([]);
+  const shimDir = await createGateShimPath();
+  const coderStore = await createFakeProviderStore([
+    {
+      type: "success",
+      writes: [{ path: "src/real-review.ts", content: "export const realReview = true;\n" }],
+      report: {
+        status: "success",
+        summary: "implemented change",
+        ownedPaths: ["."],
+        commandsAttempted: ["node implement.js"],
+        changedPaths: ["src/real-review.ts"],
+        artifacts: []
+      }
+    }
+  ]);
+  const reviewerStore = await createFakeProviderStore([
+    successReviewStep(),
+    {
+      type: "success",
+      writes: [{ path: "src/reviewer-mutation.ts", content: "export const mutated = true;\n" }],
+      report: {
+        status: "success",
+        summary: "clean review",
+        findings: [],
+        commandsAttempted: ["node review.js"]
+      }
+    }
+  ]);
+  const config = {
+    adapter: "example-app",
+    mainCheckoutRoot: projectRoot,
+    correctionLimit: 2,
+    planApprovalRiskClasses: ["money-path", "solidity-core", "shared-infrastructure"],
+    providers: {
+      claude: {
+        command: process.execPath,
+        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
+        env: {
+          FAKE_PROVIDER_STORE: coderStore,
+          PATH: `${shimDir}:${process.env.PATH}`
+        },
+        timeoutMs: 1000
+      },
+      codex: null,
+      agy: {
+        command: process.execPath,
+        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
+        env: {
+          FAKE_PROVIDER_STORE: reviewerStore,
+          PATH: `${shimDir}:${process.env.PATH}`
+        },
+        timeoutMs: 1000
+      }
+    },
+    reviewProviders: ["agy"],
+    pluginMaintenanceMode: false,
+    git: {
+      command: "git",
+      env: {},
+      statusArgs: ["status", "--short"],
+      identity: {
+        name: null,
+        email: null
+      }
+    },
+    github: {
+      command: repoPath("test", "fixtures", "fake-gh.mjs"),
+      env: {}
+    },
+    delivery: null
+  };
+  await seedRelayConfig(projectRoot, config);
+  const runResult = await run({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(runResult.ok, true);
+  await assert.rejects(
+    () =>
+      review({
+        projectRoot,
+        adapterName: "example-app",
+        beadId: "example-app-123",
+        env: relayEnv({ bdStorePath, gateStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+      }),
+    /reviewer mutated worktree contents/
+  );
 });

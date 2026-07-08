@@ -156,6 +156,9 @@
         },
         "findingsResolved": {
           "type": "boolean"
+        },
+        "reviewedArtifactHash": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -193,6 +196,10 @@
         "string",
         "null"
       ]
+    },
+    "correctionRounds": {
+      "type": "integer",
+      "minimum": 0
     }
   },
   "additionalProperties": false
