@@ -24,7 +24,7 @@ jobs:
           node scripts/sync-roles.mjs
           node scripts/sync-adapters.mjs
       - name: Assert generated artifacts are committed
-        run: git diff --exit-code -- .claude-plugin/agents .codex/agents .agents/agents .generated/adapters.json
+        run: git diff --exit-code -- .claude-plugin/agents .codex/agents .agents/agents adapters/registry.json
       - name: Run Node tests
         run: npm test
       - name: Run lint-style validators

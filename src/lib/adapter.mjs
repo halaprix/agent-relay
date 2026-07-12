@@ -149,9 +149,15 @@ async function assertExactRegistry(filePath, registry) {
   }
 }
 
-export async function syncAdapters({ check = false, outputPath = repoPath(".generated", "adapters.json") } = {}) {
+export function defaultAdapterRegistryPath() {
+  return repoPath("adapters", "registry.json");
+}
+
+export async function syncAdapters({ check = false, outputPath = defaultAdapterRegistryPath() } = {}) {
   const adapterDir = repoPath("adapters");
-  const adapterFiles = (await readdir(adapterDir)).filter((file) => file.endsWith(".json")).sort();
+  const adapterFiles = (await readdir(adapterDir))
+    .filter((file) => file.endsWith(".json") && file !== path.basename(defaultAdapterRegistryPath()))
+    .sort();
   const registry = [];
   for (const fileName of adapterFiles) {
     const adapter = await readJson(path.join(adapterDir, fileName));

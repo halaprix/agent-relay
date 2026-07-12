@@ -7,7 +7,18 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { projectStateRoot, repoPath, runStatePath } from "../src/lib/paths.mjs";
 import { pathExists, removePath } from "../src/lib/fs.mjs";
-import { cleanup, doctor, gates, plan, resume, review, run, setup } from "../src/lib/supervisor.mjs";
+import {
+  __resetTestIsolationRunnerForTests,
+  __setTestIsolationRunnerForTests,
+  cleanup,
+  doctor,
+  gates,
+  plan,
+  resume,
+  review,
+  run,
+  setup
+} from "../src/lib/supervisor.mjs";
 import {
   createCommandShim,
   createFakeBdStore,
@@ -21,6 +32,11 @@ import {
 } from "./helpers.mjs";
 
 const execFile = promisify(execFileCallback);
+
+__setTestIsolationRunnerForTests(true);
+test.after(() => {
+  __resetTestIsolationRunnerForTests();
+});
 
 function relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra = {} }) {
   return {
@@ -48,6 +64,21 @@ async function createGateShimPath() {
     `#!/usr/bin/env bash\nexec "${process.execPath}" "${repoPath("test", "fixtures", "fake-gate.mjs")}"\n`
   );
   return shimDir;
+}
+
+function fakeProviderConfig({ storePath, shimDir, vendor, strength = "strong", extraEnv = {}, timeoutMs = 1000 }) {
+  return {
+    command: process.execPath,
+    args: [repoPath("test", "fixtures", "fake-provider.mjs")],
+    env: {
+      FAKE_PROVIDER_STORE: storePath,
+      PATH: `${shimDir}:${process.env.PATH}`,
+      ...extraEnv
+    },
+    timeoutMs,
+    vendor,
+    strength
+  };
 }
 
 function baseConfig(projectRoot, gitStorePath, overrides = {}) {
@@ -176,25 +207,9 @@ test("run creates an isolated worktree and executes the coder there", { timeout:
   const reviewerStorePath = await createFakeProviderStore([successReviewStep()]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: providerStorePath,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      },
+      claude: fakeProviderConfig({ storePath: providerStorePath, shimDir, vendor: "anthropic" }),
       codex: null,
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: reviewerStorePath,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      }
+      agy: fakeProviderConfig({ storePath: reviewerStorePath, shimDir, vendor: "google" })
     },
     reviewProviders: ["agy"]
   });
@@ -214,6 +229,79 @@ test("run creates an isolated worktree and executes the coder there", { timeout:
   assert.equal(providerStore.calls[0].cwd, result.state.worktreePath);
   assert.match(providerStore.calls[0].prompt, /Gate groups: none/);
   assert.doesNotMatch(providerStore.calls[0].prompt, /formatting|solidity/);
+});
+
+test("run strips BEADS_DIR from providers and blocks absolute command and write escapes", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const bdStorePath = await createFakeBdStore({
+    issues: {
+      "example-app-123": {
+        id: "example-app-123",
+        title: "Isolation bead",
+        description: "Verify provider containment.",
+        design: "Contain providers to the assigned worktree only.",
+        acceptance_criteria: "Providers cannot access Beads or escape the writable root.",
+        riskClass: "documentation",
+        dependencies: [],
+        claimed: false,
+        claimConflict: false
+      }
+    }
+  });
+  const gitStorePath = await createFakeGitStore(projectRoot);
+  const gateStorePath = await createFakeGateStore([{ ok: true }]);
+  const shimDir = await createGateShimPath();
+  const escapePath = path.join(path.dirname(projectRoot), "provider-escape.txt");
+  const providerStorePath = await createFakeProviderStore([
+    {
+      type: "success",
+      captureEnv: true,
+      absoluteWritePath: escapePath,
+      execAbsoluteCommand: repoPath("test", "fixtures", "fake-git-driver.mjs"),
+      execAbsoluteArgs: ["status", "--short"],
+      writes: [{ path: "src/isolation.ts", content: "export const isolation = true;\n" }],
+      report: {
+        status: "success",
+        summary: "implemented change",
+        ownedPaths: ["."],
+        commandsAttempted: ["node implement.js"],
+        changedPaths: ["src/isolation.ts"],
+        artifacts: []
+      }
+    }
+  ]);
+  const reviewerStorePath = await createFakeProviderStore([successReviewStep()]);
+  const config = baseConfig(projectRoot, gitStorePath, {
+    providers: {
+      claude: fakeProviderConfig({
+        storePath: providerStorePath,
+        shimDir,
+        vendor: "anthropic",
+        extraEnv: {
+          FAKE_GIT_STORE: gitStorePath
+        }
+      }),
+      codex: null,
+      agy: fakeProviderConfig({ storePath: reviewerStorePath, shimDir, vendor: "google" })
+    },
+    reviewProviders: ["agy"]
+  });
+  await seedRelayConfig(projectRoot, config);
+  const result = await run({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(result.exitClass, "provider-quorum-unavailable");
+  assert.match(result.reason, /no provider could complete implementation/);
+  const providerStore = JSON.parse(await readFile(providerStorePath, "utf8"));
+  assert.equal(providerStore.calls[0].env.BEADS_DIR, null);
+  assert.equal(providerStore.calls[0].absoluteWrite.ok, false);
+  assert.match(providerStore.calls[0].absoluteWrite.message, /blocked write outside writable root/);
+  assert.equal(providerStore.calls[0].absoluteCommand.code, 1);
+  assert.match(providerStore.calls[0].absoluteCommand.stderr, /blocked executable/);
+  assert.equal(await pathExists(escapePath), false);
 });
 
 test("run retries service failure once, corrects on needs-fix with the same provider, and preserves partial edits across handoff", { timeout: 10000 }, async () => {
@@ -271,36 +359,12 @@ test("run retries service failure once, corrects on needs-fix with the same prov
       }
     }
   ]);
-  const reviewerStore = await createFakeProviderStore([successReviewStep()]);
+  const reviewerStore = await createFakeProviderStore([successReviewStep(), successReviewStep()]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: claudeStore,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      },
-      codex: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: codexStore,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      },
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: reviewerStore,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      }
+      claude: fakeProviderConfig({ storePath: claudeStore, shimDir, vendor: "anthropic" }),
+      codex: fakeProviderConfig({ storePath: codexStore, shimDir, vendor: "openai" }),
+      agy: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["agy"]
   });
@@ -353,22 +417,12 @@ test("run detects worktree setup failure and main-checkout drift", { timeout: 10
       }
     }
   ]);
-  const reviewerStore = await createFakeProviderStore([successReviewStep()]);
+  const reviewerStore = await createFakeProviderStore([successReviewStep(), successReviewStep()]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: providerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
+      claude: fakeProviderConfig({ storePath: providerStore, shimDir, vendor: "anthropic" }),
       codex: null,
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: reviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      }
+      agy: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["agy"]
   });
@@ -412,24 +466,9 @@ test("review enforces quorum, resumes from Bead comments without local state, an
   const secondPlanReviewerStore = await createFakeProviderStore([successReviewStep()]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: coderStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
-      codex: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: reviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: secondPlanReviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      }
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
+      codex: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "openai" }),
+      agy: fakeProviderConfig({ storePath: secondPlanReviewerStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["codex", "agy"]
   });
@@ -459,17 +498,13 @@ test("review enforces quorum, resumes from Bead comments without local state, an
     providers: {
       claude: config.providers.claude,
       codex: config.providers.codex,
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: await createFakeProviderStore([
-            successReviewStep()
-          ]),
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      }
+      agy: fakeProviderConfig({
+        storePath: await createFakeProviderStore([
+          successReviewStep()
+        ]),
+        shimDir,
+        vendor: "google"
+      })
     },
     reviewProviders: ["codex", "agy"]
   });
@@ -515,24 +550,9 @@ test("delivery uses neutral team-facing text, parses gh stdout URLs, clears dirt
   ]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: coderStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
-      codex: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: reviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: secondReviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      }
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
+      codex: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "openai" }),
+      agy: fakeProviderConfig({ storePath: secondReviewerStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["codex", "agy"],
     github: {
@@ -588,6 +608,262 @@ test("delivery uses neutral team-facing text, parses gh stdout URLs, clears dirt
   assert.equal(removed.records.prunes.length, 1);
 });
 
+test("delivery binds the reviewed artifact to the staged index even if the worktree mutates after add", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const bdStorePath = await createFakeBdStore({
+    issues: {
+      "example-app-123": {
+        id: "example-app-123",
+        title: "Staged artifact bead",
+        description: "Bind reviewed content to the staged index.",
+        design: "Stage explicit paths and reject drift.",
+        acceptance_criteria: "The committed index stays on the reviewed content.",
+        riskClass: "documentation",
+        dependencies: [],
+        claimed: false,
+        claimConflict: false
+      }
+    }
+  });
+  const gitStorePath = await createFakeGitStore(projectRoot, {
+    postAddMutation: {
+      path: "src/staged.ts",
+      content: "export const staged = 2;\n"
+    }
+  });
+  const ghStorePath = await createFakeGhStore();
+  const gateStorePath = await createFakeGateStore([{ ok: true }, { ok: true }, { ok: true }, { ok: true }, { ok: true }, { ok: true }]);
+  const shimDir = await createGateShimPath();
+  const coderStore = await createFakeProviderStore([
+    {
+      type: "success",
+      writes: [{ path: "src/staged.ts", content: "export const staged = 1;\n" }],
+      report: {
+        status: "success",
+        summary: "implemented change",
+        ownedPaths: ["."],
+        commandsAttempted: ["node implement.js"],
+        changedPaths: ["src/staged.ts"],
+        artifacts: []
+      }
+    }
+  ]);
+  const reviewerStore = await createFakeProviderStore([successReviewStep(), successReviewStep()]);
+  const config = baseConfig(projectRoot, gitStorePath, {
+    providers: {
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
+      codex: null,
+      agy: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "google" })
+    },
+    reviewProviders: ["agy"],
+    github: {
+      command: repoPath("test", "fixtures", "fake-gh.mjs"),
+      env: {
+        FAKE_GH_STORE: ghStorePath
+      }
+    },
+    delivery: {
+      enabled: true,
+      identity: {
+        name: "Relay User",
+        email: "relay@example.com"
+      }
+    }
+  });
+  await seedRelayConfig(projectRoot, config);
+  const runResult = await run({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(runResult.ok, true);
+  const reviewResult = await review({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(reviewResult.ok, true);
+  const gitStore = JSON.parse(await readFile(gitStorePath, "utf8"));
+  const stagedPaths = gitStore.records.staged.at(-1).paths;
+  assert.deepEqual(stagedPaths, ["src/staged.ts"]);
+  assert.equal(gitStore.worktrees[reviewResult.state.worktreePath].index["src/staged.ts"], "export const staged = 1;\n");
+  assert.equal(await readFile(path.join(reviewResult.state.worktreePath, "src", "staged.ts"), "utf8"), "export const staged = 2;\n");
+});
+
+test("resume reparses metadata.agentRelay JSON and invalidates stale recovered approvals when the spec changes", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const bdStorePath = await createFakeBdStore({
+    issues: {
+      "example-app-123": {
+        id: "example-app-123",
+        title: "Metadata recovery bead",
+        description: "Recover state from Bead comments.",
+        design: "Use metadata-driven policy.",
+        acceptance_criteria: "Changed metadata invalidates stale approval state.",
+        riskClass: "documentation",
+        metadata: {
+          agentRelay: JSON.stringify({
+            riskClass: "money-path",
+            ownedPaths: ["src/alpha.ts"],
+            gateGroups: ["sdk-package"]
+          })
+        },
+        dependencies: [],
+        claimed: false,
+        claimConflict: false
+      }
+    }
+  });
+  const gitStorePath = await createFakeGitStore(projectRoot);
+  const gateStorePath = await createFakeGateStore([{ ok: true }]);
+  const shimDir = await createGateShimPath();
+  const coderStore = await createFakeProviderStore([
+    {
+      type: "success",
+      report: {
+        status: "success",
+        summary: "implemented high risk change",
+        ownedPaths: ["src/alpha.ts"],
+        commandsAttempted: ["node implement.js"],
+        changedPaths: [],
+        artifacts: []
+      }
+    }
+  ]);
+  const codexStore = await createFakeProviderStore([successReviewStep(), successReviewStep()]);
+  const agyStore = await createFakeProviderStore([successReviewStep(), successReviewStep()]);
+  const config = baseConfig(projectRoot, gitStorePath, {
+    providers: {
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
+      codex: fakeProviderConfig({ storePath: codexStore, shimDir, vendor: "openai" }),
+      agy: fakeProviderConfig({ storePath: agyStore, shimDir, vendor: "google" })
+    },
+    reviewProviders: ["codex", "agy"]
+  });
+  await seedRelayConfig(projectRoot, config);
+  const planResult = await plan({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(planResult.exitClass, "human-action-required");
+  assert.deepEqual(planResult.state.ownedPaths, ["src/alpha.ts"]);
+  const oldSpecHash = planResult.state.specHash;
+  await mutateBdStore(bdStorePath, (store) => {
+    store.comments["example-app-123"].push({
+      text: JSON.stringify({ kind: "agent-relay-plan-approval", specHash: oldSpecHash, approved: true })
+    });
+    store.issues["example-app-123"].metadata.agentRelay = JSON.stringify({
+      riskClass: "money-path",
+      ownedPaths: ["src/beta.ts"],
+      gateGroups: ["app-package"]
+    });
+  });
+  await removePath(runStatePath(projectRoot, "example-app-123"));
+  const resumed = await resume({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(resumed.exitClass, "human-action-required");
+  assert.deepEqual(resumed.state.ownedPaths, ["src/beta.ts"]);
+  assert.notEqual(resumed.state.specHash, oldSpecHash);
+  assert.equal(resumed.state.planReview.completed, true);
+  assert.match(resumed.reason, /matching specHash|agent-relay-plan-approval/);
+});
+
+test("delivery routing uses default groups for documentation and normal code, and the override for solidity-core", { timeout: 40000 }, async () => {
+  async function deliverForRisk(riskClass) {
+    const projectRoot = await createProjectFixture();
+    const bdStorePath = await createFakeBdStore({
+      issues: {
+        "example-app-123": {
+          id: "example-app-123",
+          title: `${riskClass} bead`,
+          description: "Exercise delivery routing.",
+          design: "Route delivery gates by risk class.",
+          acceptance_criteria: "The expected gate groups run.",
+          riskClass,
+          dependencies: [],
+          claimed: false,
+          claimConflict: false
+        }
+      }
+    });
+    const gitStorePath = await createFakeGitStore(projectRoot);
+    const ghStorePath = await createFakeGhStore();
+    const gateStorePath = await createFakeGateStore(Array.from({ length: 8 }, () => ({ ok: true })));
+    const shimDir = await createGateShimPath();
+    const coderStore = await createFakeProviderStore([
+      {
+        type: "success",
+        writes: [{ path: `src/${riskClass}.ts`, content: `export const risk = ${JSON.stringify(riskClass)};\n` }],
+        report: {
+          status: "success",
+          summary: "implemented change",
+          ownedPaths: ["."],
+          commandsAttempted: ["node implement.js"],
+          changedPaths: [`src/${riskClass}.ts`],
+          artifacts: []
+        }
+      }
+    ]);
+    const openaiReviewStore = await createFakeProviderStore([successReviewStep(), successReviewStep(), successReviewStep()]);
+    const googleReviewStore = await createFakeProviderStore([successReviewStep(), successReviewStep(), successReviewStep()]);
+    const config = baseConfig(projectRoot, gitStorePath, {
+      planApprovalRiskClasses: [],
+      providers: {
+        claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
+        codex: fakeProviderConfig({ storePath: openaiReviewStore, shimDir, vendor: "openai" }),
+        agy: fakeProviderConfig({ storePath: googleReviewStore, shimDir, vendor: "google" })
+      },
+      reviewProviders: riskClass === "documentation" ? ["codex"] : ["codex", "agy"],
+      github: {
+        command: repoPath("test", "fixtures", "fake-gh.mjs"),
+        env: {
+          FAKE_GH_STORE: ghStorePath
+        }
+      },
+      delivery: {
+        enabled: true,
+        identity: {
+          name: "Relay User",
+          email: "relay@example.com"
+        }
+      }
+    });
+    await seedRelayConfig(projectRoot, config);
+    const runResult = await run({
+      projectRoot,
+      adapterName: "example-app",
+      beadId: "example-app-123",
+      env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+    });
+    assert.equal(runResult.ok, true);
+    const reviewResult = await review({
+      projectRoot,
+      adapterName: "example-app",
+      beadId: "example-app-123",
+      env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+    });
+    assert.equal(reviewResult.ok, true);
+    return reviewResult.state.gateResults.map((gate) => gate.group);
+  }
+
+  const documentationGroups = await deliverForRisk("documentation");
+  const normalGroups = await deliverForRisk("normal-code");
+  const solidityGroups = await deliverForRisk("solidity-core");
+
+  assert.equal(documentationGroups.includes("solidity"), false);
+  assert.deepEqual(normalGroups, documentationGroups);
+  assert.equal(solidityGroups.includes("solidity"), true);
+  assert.equal(solidityGroups.filter((group) => group === "solidity").length, 2);
+});
+
 test("run does not bypass plan review quorum for non-documentation work", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore();
@@ -610,18 +886,8 @@ test("run does not bypass plan review quorum for non-documentation work", { time
   const reviewerStore = await createFakeProviderStore([successReviewStep()]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: coderStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
-      codex: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: reviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
+      codex: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "openai" }),
       agy: null
     },
     reviewProviders: ["codex"]
@@ -675,24 +941,9 @@ test("high-risk plans require matching approval comments and resume advances on 
   const agyStore = await createFakeProviderStore([successReviewStep()]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: coderStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
-      codex: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: codexStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: agyStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      }
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
+      codex: fakeProviderConfig({ storePath: codexStore, shimDir, vendor: "openai" }),
+      agy: fakeProviderConfig({ storePath: agyStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["codex", "agy"]
   });
@@ -790,19 +1041,9 @@ test("review corrections return to the same coder and include consolidated findi
   ]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: coderStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      },
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
       codex: null,
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: reviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      }
+      agy: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["agy"],
     github: {
@@ -879,23 +1120,16 @@ test("run fails closed when the coder mutates the worktree branch", { timeout: 1
   const reviewerStore = await createFakeProviderStore([successReviewStep()]);
   const config = baseConfig(projectRoot, gitStorePath, {
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: coderStore,
-          FAKE_GIT_STORE: gitStorePath,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      },
+      claude: fakeProviderConfig({
+        storePath: coderStore,
+        shimDir,
+        vendor: "anthropic",
+        extraEnv: {
+          FAKE_GIT_STORE: gitStorePath
+        }
+      }),
       codex: null,
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: { FAKE_PROVIDER_STORE: reviewerStore, PATH: `${shimDir}:${process.env.PATH}` },
-        timeoutMs: 1000
-      }
+      agy: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["agy"]
   });
@@ -1024,25 +1258,9 @@ test("review fails closed when a reviewer mutates a real git worktree", { timeou
     correctionLimit: 2,
     planApprovalRiskClasses: ["money-path", "solidity-core", "shared-infrastructure"],
     providers: {
-      claude: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: coderStore,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      },
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "anthropic" }),
       codex: null,
-      agy: {
-        command: process.execPath,
-        args: [repoPath("test", "fixtures", "fake-provider.mjs")],
-        env: {
-          FAKE_PROVIDER_STORE: reviewerStore,
-          PATH: `${shimDir}:${process.env.PATH}`
-        },
-        timeoutMs: 1000
-      }
+      agy: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "google" })
     },
     reviewProviders: ["agy"],
     pluginMaintenanceMode: false,

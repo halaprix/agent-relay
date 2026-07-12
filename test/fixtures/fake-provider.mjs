@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 
@@ -12,11 +13,18 @@ let prompt = null;
 if (promptPath) {
   prompt = await readFile(promptPath, "utf8").catch(() => null);
 }
-store.calls.push({
+const call = {
   cwd: process.cwd(),
   argv: process.argv.slice(2),
   prompt
-});
+};
+if (step.captureEnv) {
+  call.env = {
+    BEADS_DIR: process.env.BEADS_DIR ?? null,
+    PATH: process.env.PATH ?? null
+  };
+}
+store.calls.push(call);
 await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
 
 async function writeStdout(text) {
@@ -39,6 +47,67 @@ for (const change of step.writes || []) {
   const filePath = path.join(process.cwd(), change.path);
   await writeFile(filePath, change.content, "utf8");
 }
+
+if (step.absoluteWritePath) {
+  try {
+    await writeFile(step.absoluteWritePath, step.absoluteWriteContent || "escape\n", "utf8");
+    call.absoluteWrite = { ok: true };
+  } catch (error) {
+    call.absoluteWrite = { ok: false, message: error.message };
+  }
+  await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+if (step.execAbsoluteCommand) {
+  const commandArgs = step.execAbsoluteArgs || [];
+  const result = await new Promise((resolve) => {
+    try {
+      const child = spawn(step.execAbsoluteCommand, commandArgs, {
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk;
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      child.on("close", (code, signal) => {
+        resolve({ code, signal, stdout, stderr });
+      });
+      child.on("error", (error) => {
+        resolve({ code: 1, signal: null, stdout, stderr: error.message });
+      });
+    } catch (error) {
+      resolve({ code: 1, signal: null, stdout: "", stderr: error.message });
+    }
+  });
+  call.absoluteCommand = result;
+  await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  if (result.code !== 0) {
+    await writeStderr(result.stderr || "absolute command failed\n");
+    process.exit(result.code ?? 1);
+  }
+}
+
+if (step.delayedWrite) {
+  const delayedPath = step.delayedWrite.absolute
+    ? step.delayedWrite.path
+    : path.join(process.cwd(), step.delayedWrite.path);
+  const delayMs = step.delayedWrite.delayMs || 250;
+  const delayedContent = JSON.stringify(step.delayedWrite.content || "delayed\n");
+  const delayedTarget = JSON.stringify(delayedPath);
+  spawn(process.execPath, [
+    "-e",
+    `setTimeout(async()=>{const fs=require('node:fs/promises');await fs.writeFile(${delayedTarget}, ${delayedContent}, 'utf8');}, ${delayMs});`
+  ], {
+    detached: true,
+    stdio: "ignore"
+  }).unref();
+}
+
+await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
 
 if (step.gitDrift && process.env.FAKE_GIT_STORE) {
   const gitStore = JSON.parse(await readFile(process.env.FAKE_GIT_STORE, "utf8"));

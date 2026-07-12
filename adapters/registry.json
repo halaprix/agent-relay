@@ -1,0 +1,16 @@
+{
+  "adapters": [
+    {
+      "name": "example-app",
+      "version": 1,
+      "baseBranch": "dev",
+      "requiredFiles": [
+        "AGENTS.md",
+        "STATE.md",
+        "docs/architecture/architecture-overview.md",
+        "docs/architecture/data-model.md",
+        "docs/architecture/module-map.md"
+      ]
+    }
+  ]
+}

@@ -86,6 +86,7 @@ if (args[0] === "worktree" && args[1] === "add") {
   store.worktrees[worktreePath] = {
     branch: null,
     head: store.baseSha,
+    index: {},
     staged: [],
     commits: [],
     pushes: [],
@@ -98,7 +99,7 @@ if (args[0] === "worktree" && args[1] === "add") {
 
 if (args[0] === "checkout" && args[1] === "-b") {
   if (!store.worktrees[process.cwd()]) {
-    store.worktrees[process.cwd()] = { branch: null, staged: [], commits: [], pushes: [], statusQueue: [] };
+    store.worktrees[process.cwd()] = { branch: null, index: {}, staged: [], commits: [], pushes: [], statusQueue: [] };
   }
   store.worktrees[process.cwd()].branch = args[2];
   await save();
@@ -107,8 +108,28 @@ if (args[0] === "checkout" && args[1] === "-b") {
 
 if (args[0] === "add") {
   const paths = args.slice(args.indexOf("--") + 1);
+  const worktree = store.worktrees[process.cwd()];
+  worktree.index ||= {};
+  for (const relativePath of paths) {
+    worktree.index[relativePath] = await readFile(path.join(process.cwd(), relativePath), "utf8");
+  }
   store.records.staged.push({ cwd: process.cwd(), paths });
+  if (store.postAddMutation) {
+    await writeFile(path.join(process.cwd(), store.postAddMutation.path), store.postAddMutation.content, "utf8");
+  }
   await save();
+  process.exit(0);
+}
+
+if (args[0] === "show" && typeof args[1] === "string" && args[1].startsWith(":")) {
+  const worktree = store.worktrees[process.cwd()];
+  const relativePath = args[1].slice(1);
+  const content = worktree?.index?.[relativePath];
+  if (content === undefined) {
+    await err(`missing staged path ${relativePath}\n`);
+    process.exit(1);
+  }
+  await out(content);
   process.exit(0);
 }
 

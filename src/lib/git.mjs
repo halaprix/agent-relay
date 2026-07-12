@@ -110,7 +110,7 @@ export async function writeSnapshotArtifact(filePath, snapshot) {
 }
 
 export async function buildScopeLockedDiffArtifact({ worktreePath, beforeSnapshot, filePath }) {
-  const afterSnapshot = await captureSnapshot(worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay"] });
+  const afterSnapshot = await captureSnapshot(worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
   const changedPaths = diffSnapshots(beforeSnapshot, afterSnapshot);
   const sections = [];
   for (const relativePath of changedPaths) {
@@ -124,6 +124,17 @@ export async function buildScopeLockedDiffArtifact({ worktreePath, beforeSnapsho
     "utf8"
   );
   return { changedPaths, afterSnapshot };
+}
+
+export async function buildStagedDiffArtifact({ config, worktreePath, changedPaths, filePath }) {
+  const sections = [];
+  for (const relativePath of changedPaths) {
+    const run = await runGit(config, worktreePath, ["show", `:${relativePath}`], { timeoutMs: 30000 });
+    const content = run.code === 0 ? run.stdout : "<deleted or unreadable>";
+    sections.push(`### ${relativePath}\n${content}`);
+  }
+  await writeFile(filePath, `# Scope-Locked Diff\n\n${sections.join("\n\n")}\n`, "utf8");
+  return filePath;
 }
 
 export async function stageExplicitPaths(config, worktreePath, changedPaths) {

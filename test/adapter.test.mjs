@@ -2,8 +2,24 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { loadAdapter, syncAdapters, validateAdapter } from "../src/lib/adapter.mjs";
+import { spawnSync } from "node:child_process";
+import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { repoPath } from "../src/lib/paths.mjs";
+import { defaultAdapterRegistryPath, loadAdapter, syncAdapters, validateAdapter } from "../src/lib/adapter.mjs";
+
+async function createArchiveFixture() {
+  const archiveRoot = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-archive-")), "repo");
+  await cp(repoPath(), archiveRoot, {
+    recursive: true,
+    filter(source) {
+      const relative = path.relative(repoPath(), source);
+      return ![".git", ".generated", "node_modules"].some(
+        (prefix) => relative === prefix || relative.startsWith(`${prefix}${path.sep}`)
+      );
+    }
+  });
+  return archiveRoot;
+}
 
 test("example adapter validates", async () => {
   const { adapter } = await loadAdapter("example-app");
@@ -41,4 +57,15 @@ test("syncAdapters --check fails on registry drift", async () => {
   const original = await readFile(outputPath, "utf8");
   await writeFile(outputPath, original.replace("\"dev\"", "\"main\""), "utf8");
   await assert.rejects(() => syncAdapters({ check: true, outputPath }), /generated adapter registry drift detected/);
+});
+
+test("npm run check passes from an archive-style checkout without ignored generated output", async () => {
+  const archiveRoot = await createArchiveFixture();
+  const registryPath = path.join(archiveRoot, "adapters", "registry.json");
+  assert.equal(registryPath.endsWith(path.relative(repoPath(), defaultAdapterRegistryPath())), true);
+  const run = spawnSync("npm", ["run", "check"], {
+    cwd: archiveRoot,
+    encoding: "utf8"
+  });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
 });

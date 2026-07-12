@@ -1,10 +1,11 @@
 import path from "node:path";
-import { readdir, readFile, writeFile, mkdtemp, rename } from "node:fs/promises";
+import { copyFile, readdir, readFile, realpath, writeFile, mkdtemp, rename } from "node:fs/promises";
 import os from "node:os";
 import { loadAdapter, syncAdapters } from "./adapter.mjs";
 import { appendBeadComment, approvalForSpecHash, rebuildStateFromBeadComments, verifyBeadsStore } from "./beads.mjs";
 import { ensureDir, pathExists, readJson, writeJson, appendJsonl, removePath, listFilesRecursive } from "./fs.mjs";
 import {
+  buildStagedDiffArtifact,
   buildScopeLockedDiffArtifact,
   captureSnapshot,
   createDetachedWorktree,
@@ -29,6 +30,10 @@ import { classifyProviderFailure, parseWorkerReport, runProviderCommand } from "
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
 import { validateReviewReport, validateWorkerReport } from "./validate.mjs";
+
+const SUPPORTED_REVIEW_VENDORS = new Set(["anthropic", "openai", "google"]);
+let bubblewrapSupportPromise;
+let testIsolationRunnerEnabled = false;
 
 function nowIso() {
   return new Date().toISOString();
@@ -57,25 +62,74 @@ function neutralNames(issueTitle, specHash) {
   };
 }
 
-function computeSpecHash(bead) {
+function agentRelayMetadata(bead) {
+  const candidates = [
+    bead?.metadata?.agentRelay,
+    bead?.metadata?.agent_relay,
+    bead?.customFields?.agentRelay,
+    bead?.custom_fields?.agentRelay
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    if (typeof candidate === "string") {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch {
+        continue;
+      }
+    }
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
+function resolveBeadPolicy(bead, config) {
+  const metadata = agentRelayMetadata(bead);
+  const riskClass = metadata.riskClass || bead.riskClass || "normal-code";
+  const ownedPaths = Array.isArray(metadata.ownedPaths) && metadata.ownedPaths.length > 0
+    ? metadata.ownedPaths
+    : (Array.isArray(bead.ownedPaths) && bead.ownedPaths.length > 0 ? bead.ownedPaths : ["."]);
+  const gateGroups = Array.isArray(metadata.gateGroups) && metadata.gateGroups.length > 0
+    ? metadata.gateGroups
+    : (Array.isArray(bead.gateGroups) ? bead.gateGroups : []);
+  const approvalRequired = typeof metadata.approvalRequired === "boolean"
+    ? metadata.approvalRequired
+    : (config.planApprovalRiskClasses || []).includes(riskClass);
+  return {
+    riskClass,
+    ownedPaths,
+    gateGroups,
+    approvalRequired
+  };
+}
+
+function computeSpecHash(bead, policy) {
   return sha256Json({
     description: bead.description || "",
     design: bead.design || "",
     acceptance: bead.acceptance_criteria || bead.acceptance || "",
     dependencies: bead.dependencies || [],
-    riskClass: bead.riskClass || "normal-code",
-    ownedPaths: bead.ownedPaths || ["."],
-    gateGroups: bead.gateGroups || []
+    riskClass: policy.riskClass,
+    ownedPaths: policy.ownedPaths,
+    gateGroups: policy.gateGroups,
+    approvalRequired: policy.approvalRequired
   });
 }
 
-function defaultPlanReview(config, riskClass, specHash) {
+function defaultPlanReview(approvalRequired, specHash) {
   return {
     completed: false,
     findingsResolved: false,
     reviewers: [],
     findings: [],
-    approvalRequired: (config.planApprovalRiskClasses || []).includes(riskClass || "normal-code"),
+    approvalRequired,
     approvalSpecHash: specHash
   };
 }
@@ -301,42 +355,433 @@ function providerCommandFromConfig(config, providerName) {
 }
 
 function providerVendor(providerName, providerConfig) {
-  return providerConfig?.vendor || providerName;
+  if (typeof providerConfig?.vendor !== "string" || providerConfig.vendor.trim() === "") {
+    return null;
+  }
+  const vendor = providerConfig.vendor.trim().toLowerCase();
+  return SUPPORTED_REVIEW_VENDORS.has(vendor) ? vendor : null;
 }
 
 function providerStrength(providerConfig) {
-  return providerConfig?.strength || "strong";
-}
-
-async function createProviderPathShim({ beadId, providerName, allowReadOnlyGit = false }) {
-  const shimDir = await mkdtemp(path.join(os.tmpdir(), `agent-relay-shim-${beadId}-${providerName}-`));
-  const denyBody = (name) => `#!/usr/bin/env bash\necho "${name} is blocked by agent-relay supervision" >&2\nexit 1\n`;
-  await writeFile(path.join(shimDir, "bd"), denyBody("bd"), { mode: 0o755 });
-  await writeFile(path.join(shimDir, "gh"), denyBody("gh"), { mode: 0o755 });
-  const gitBody = allowReadOnlyGit
-    ? `#!/usr/bin/env bash\ncase "$1" in\n  rev-parse|show-ref|symbolic-ref|status|config|remote)\n    command git "$@"\n    ;;\n  *)\n    echo "git mutation is blocked by agent-relay supervision" >&2\n    exit 1\n    ;;\nesac\n`
-    : denyBody("git");
-  await writeFile(path.join(shimDir, "git"), gitBody, { mode: 0o755 });
-  return shimDir;
-}
-
-async function buildProviderExecutionEnv({ providerConfig, beadId, providerName, mode }) {
-  const pathValue = providerConfig.env?.PATH || process.env.PATH;
-  if (!pathValue) {
-    throw new Error(`provider containment is unavailable for ${providerName}`);
+  if (typeof providerConfig?.strength !== "string" || providerConfig.strength.trim() === "") {
+    return null;
   }
-  const shimDir = await createProviderPathShim({
-    beadId,
-    providerName,
-    allowReadOnlyGit: mode === "read-only"
-  });
+  return providerConfig.strength.trim();
+}
+
+function validateRuntimeProviderConfig(providerName, providerConfig, { requireReviewMetadata = false } = {}) {
+  if (!providerConfig || typeof providerConfig !== "object") {
+    throw new Error(`provider ${providerName} is misconfigured`);
+  }
+  if (typeof providerConfig.command !== "string" || providerConfig.command.trim() === "") {
+    throw new Error(`provider ${providerName}.command must be a non-empty string`);
+  }
+  if (providerConfig.args !== undefined && (!Array.isArray(providerConfig.args) || providerConfig.args.some((arg) => typeof arg !== "string"))) {
+    throw new Error(`provider ${providerName}.args must be a string array`);
+  }
+  if (providerConfig.env !== undefined && (providerConfig.env === null || typeof providerConfig.env !== "object" || Array.isArray(providerConfig.env))) {
+    throw new Error(`provider ${providerName}.env must be an object`);
+  }
+  if (requireReviewMetadata) {
+    if (!providerVendor(providerName, providerConfig)) {
+      throw new Error(`provider ${providerName}.vendor must be configured explicitly for review`);
+    }
+    if (!providerStrength(providerConfig)) {
+      throw new Error(`provider ${providerName}.strength must be configured explicitly for review`);
+    }
+  }
+}
+
+async function resolveCommandPath(command, pathValue = process.env.PATH || "") {
+  if (path.isAbsolute(command)) {
+    return realpath(command);
+  }
+  for (const segment of pathValue.split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(segment, command);
+    if (await pathExists(candidate)) {
+      return realpath(candidate);
+    }
+  }
+  throw new Error(`unable to resolve command path for ${command}`);
+}
+
+function parentDirectories(targetPath) {
+  const dirs = [];
+  let current = path.dirname(targetPath);
+  while (current && current !== path.dirname(current)) {
+    dirs.push(current);
+    current = path.dirname(current);
+  }
+  if (current === "/") {
+    dirs.push("/");
+  }
+  return [...new Set(dirs)].reverse();
+}
+
+function isUnderAnyRoot(targetPath, roots) {
+  return roots.some((root) => targetPath === root || targetPath.startsWith(`${root}${path.sep}`));
+}
+
+async function writeExecutable(filePath, body) {
+  await ensureDir(path.dirname(filePath));
+  await writeFile(filePath, body, { encoding: "utf8", mode: 0o755 });
+}
+
+function providerRunsOnNode(providerConfig) {
+  const command = providerConfig.command || "";
+  return (
+    command === process.execPath ||
+    /\bnode(?:js)?$/.test(path.basename(command)) ||
+    command.endsWith(".js") ||
+    command.endsWith(".mjs") ||
+    command.endsWith(".cjs")
+  );
+}
+
+async function bubblewrapSupported() {
+  if (bubblewrapSupportPromise) {
+    return bubblewrapSupportPromise;
+  }
+  bubblewrapSupportPromise = (async () => {
+    if (!(await pathExists("/usr/bin/bwrap"))) {
+      return false;
+    }
+    const probeDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-bwrap-probe-"));
+    const run = await runProviderCommand({
+      providerName: "bubblewrap-probe",
+      command: "/usr/bin/bwrap",
+      args: [
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-all",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind",
+        "/bin",
+        "/bin",
+        "--ro-bind",
+        "/lib",
+        "/lib",
+        "--ro-bind",
+        "/lib64",
+        "/lib64",
+        "--ro-bind",
+        "/etc",
+        "/etc",
+        "--dir",
+        probeDir,
+        "--chdir",
+        probeDir,
+        process.execPath,
+        "-e",
+        "process.exit(0)"
+      ],
+      cwd: probeDir,
+      env: {},
+      timeoutMs: 2000,
+      inheritEnv: false,
+      captureViaEnv: false
+    });
+    return run.code === 0;
+  })();
+  return bubblewrapSupportPromise;
+}
+
+async function createTestIsolationHook({ bundleRoot, writableRoot, blockedCandidates }) {
+  const hookPath = path.join(bundleRoot, "test-isolation-hook.cjs");
+  const blockedPaths = [...blockedCandidates.keys()].sort();
+  const blockedBasenames = [...new Set([...blockedCandidates.values(), "git", "gh", "bd"])].sort();
+  const hookSource = `
+const fs = require("node:fs");
+const fsp = require("node:fs/promises");
+const cp = require("node:child_process");
+const path = require("node:path");
+
+if (!global.__agentRelayTestIsolationInstalled) {
+  global.__agentRelayTestIsolationInstalled = true;
+  const writableRoot = ${JSON.stringify(writableRoot)};
+  const blockedPaths = new Set(${JSON.stringify(blockedPaths)});
+  const blockedBasenames = new Set(${JSON.stringify(blockedBasenames)});
+  const allowedExtraWrites = new Set(
+    [process.env.AGENT_RELAY_STDOUT_FILE, process.env.AGENT_RELAY_STDERR_FILE]
+      .filter(Boolean)
+      .map((targetPath) => path.normalize(targetPath))
+  );
+
+  function resolvePath(targetPath) {
+    try {
+      return fs.realpathSync(targetPath);
+    } catch {
+      return path.resolve(targetPath);
+    }
+  }
+
+  function resolveWriteTarget(targetPath) {
+    return path.normalize(path.isAbsolute(targetPath) ? targetPath : path.resolve(process.cwd(), targetPath));
+  }
+
+  function assertWritable(targetPath) {
+    const resolved = resolveWriteTarget(targetPath);
+    if (
+      !allowedExtraWrites.has(resolved) &&
+      resolved !== writableRoot &&
+      !resolved.startsWith(writableRoot + path.sep)
+    ) {
+      throw new Error("agent-relay test isolation blocked write outside writable root: " + resolved);
+    }
+  }
+
+  function patchFsWrite(object, method) {
+    if (typeof object?.[method] !== "function") {
+      return;
+    }
+    const original = object[method];
+    object[method] = function patched(targetPath, ...args) {
+      assertWritable(targetPath);
+      return original.call(this, targetPath, ...args);
+    };
+  }
+
+  function patchOpen(object, method) {
+    if (typeof object?.[method] !== "function") {
+      return;
+    }
+    const original = object[method];
+    object[method] = function patched(targetPath, flags, ...args) {
+      const mode = typeof flags === "string" ? flags : "";
+      if (/[wa+]/.test(mode)) {
+        assertWritable(targetPath);
+      }
+      return original.call(this, targetPath, flags, ...args);
+    };
+  }
+
+  function patchRename(object, method) {
+    if (typeof object?.[method] !== "function") {
+      return;
+    }
+    const original = object[method];
+    object[method] = function patched(sourcePath, destinationPath, ...args) {
+      assertWritable(sourcePath);
+      assertWritable(destinationPath);
+      return original.call(this, sourcePath, destinationPath, ...args);
+    };
+  }
+
+  function patchSpawnLike(method) {
+    if (typeof cp[method] !== "function") {
+      return;
+    }
+    const original = cp[method];
+    cp[method] = function patched(command, ...args) {
+      const commandText = typeof command === "string" ? command : "";
+      const basename = path.basename(commandText || "");
+      const resolved = commandText ? resolvePath(commandText) : "";
+      if (
+        blockedBasenames.has(commandText) ||
+        blockedBasenames.has(basename) ||
+        blockedPaths.has(commandText) ||
+        blockedPaths.has(resolved)
+      ) {
+        throw new Error("agent-relay test isolation blocked executable: " + commandText);
+      }
+      return original.call(this, command, ...args);
+    };
+  }
+
+  patchFsWrite(fs, "writeFile");
+  patchFsWrite(fs, "appendFile");
+  patchFsWrite(fs, "writeFileSync");
+  patchFsWrite(fs, "appendFileSync");
+  patchFsWrite(fsp, "writeFile");
+  patchFsWrite(fsp, "appendFile");
+  patchOpen(fs, "open");
+  patchOpen(fs, "openSync");
+  patchOpen(fsp, "open");
+  patchRename(fs, "rename");
+  patchRename(fs, "renameSync");
+  patchRename(fsp, "rename");
+  patchSpawnLike("spawn");
+  patchSpawnLike("execFile");
+  patchSpawnLike("execFileSync");
+  patchSpawnLike("exec");
+  patchSpawnLike("execSync");
+  patchSpawnLike("fork");
+}
+`;
+  await writeFile(hookPath, hookSource, "utf8");
+  return hookPath;
+}
+
+function allowTestIsolationRunner(providerConfig) {
+  return Boolean(testIsolationRunnerEnabled && providerConfig?.env?.FAKE_PROVIDER_STORE);
+}
+
+async function mirrorProviderEnvFiles(env, writableRoot, providerName) {
+  const mirrored = { ...env };
+  const syncBack = [];
+  for (const key of ["FAKE_PROVIDER_STORE", "FAKE_GIT_STORE", "FAKE_GH_STORE", "FAKE_GATE_STORE"]) {
+    if (!env[key]) {
+      continue;
+    }
+    const targetPath = env[key];
+    const mirrorPath = path.join(writableRoot, ".agent-relay-sandbox", providerName, path.basename(targetPath));
+    await ensureDir(path.dirname(mirrorPath));
+    if (await pathExists(targetPath)) {
+      await copyFile(targetPath, mirrorPath);
+    } else {
+      await writeFile(mirrorPath, "", "utf8");
+    }
+    mirrored[key] = mirrorPath;
+    syncBack.push({ mirrorPath, targetPath });
+  }
+  return {
+    mirrored,
+    async flush() {
+      for (const file of syncBack) {
+        if (await pathExists(file.mirrorPath)) {
+          await copyFile(file.mirrorPath, file.targetPath);
+        }
+      }
+    }
+  };
+}
+
+async function createProviderBundle({ beadId, providerName, promptContents, copiedArtifacts = [] }) {
+  const bundleRoot = await mkdtemp(path.join(os.tmpdir(), `agent-relay-provider-${beadId}-${providerName}-`));
+  const promptPath = path.join(bundleRoot, "prompt.txt");
+  await writeFile(promptPath, `${promptContents}\n`, "utf8");
+  const copied = [];
+  for (const artifact of copiedArtifacts) {
+    const destination = path.join(bundleRoot, artifact.fileName);
+    await copyFile(artifact.sourcePath, destination);
+    copied.push(destination);
+  }
+  return { bundleRoot, promptPath, copiedArtifacts: copied };
+}
+
+async function prepareIsolatedProviderRun({
+  config,
+  providerConfig,
+  beadId,
+  providerName,
+  cwd,
+  writableRoot,
+  promptContents,
+  copiedArtifacts = []
+}) {
+  validateRuntimeProviderConfig(providerName, providerConfig);
+  const bundle = await createProviderBundle({ beadId, providerName, promptContents, copiedArtifacts });
+  const { mirrored, flush } = await mirrorProviderEnvFiles(providerConfig.env || {}, writableRoot, providerName);
+  const pathValue = mirrored.PATH || process.env.PATH || "";
+  const originalCommand = providerConfig.command;
+  const absoluteCommand = await resolveCommandPath(originalCommand, pathValue);
+  const commandArgs = providerConfig.args || [];
+  const resolvedCommand = originalCommand.endsWith(".mjs") || originalCommand.endsWith(".js") ? process.execPath : absoluteCommand;
+  const resolvedArgs =
+    resolvedCommand === process.execPath && absoluteCommand !== process.execPath
+      ? [absoluteCommand, ...commandArgs, bundle.promptPath]
+      : [...commandArgs, bundle.promptPath];
+  const mounts = new Map();
+  const writableMounts = new Set([writableRoot]);
+  for (const systemDir of ["/usr", "/bin", "/lib", "/lib64", "/etc"]) {
+    if (await pathExists(systemDir)) {
+      mounts.set(systemDir, { source: systemDir, mode: "ro" });
+    }
+  }
+  mounts.set(bundle.bundleRoot, { source: bundle.bundleRoot, mode: "ro" });
+  mounts.set(writableRoot, { source: writableRoot, mode: "rw" });
+
+  const providerFiles = [resolvedCommand, ...resolvedArgs.filter((arg) => path.isAbsolute(arg))];
+  for (const providerFile of providerFiles) {
+    if (isUnderAnyRoot(providerFile, [...mounts.keys()])) {
+      continue;
+    }
+    mounts.set(providerFile, { source: providerFile, mode: "ro" });
+  }
+
+  const blockedRoot = path.join(bundle.bundleRoot, "blocked");
+  const denyBody = (name) => `#!/usr/bin/env sh\necho "${name} is blocked by agent-relay supervision" >&2\nexit 1\n`;
+  const blockedCandidates = new Map();
+  for (const candidate of [config.git?.command, config.github?.command, mirrored.AGENT_RELAY_BD_BIN, "git", "gh", "bd"].filter(Boolean)) {
+    try {
+      const resolved = await resolveCommandPath(candidate, pathValue);
+      blockedCandidates.set(resolved, path.basename(resolved));
+    } catch {
+      continue;
+    }
+  }
+  for (const [resolvedPath, name] of blockedCandidates) {
+    const denyPath = path.join(blockedRoot, name);
+    await writeExecutable(denyPath, denyBody(name));
+    mounts.set(resolvedPath, { source: denyPath, mode: "rw" });
+  }
+
   const env = {
-    ...(providerConfig.env || {}),
-    PATH: `${shimDir}:${pathValue}`
+    HOME: path.join(bundle.bundleRoot, "home"),
+    LANG: process.env.LANG || "C.UTF-8",
+    PATH: mirrored.PATH || process.env.PATH || "/usr/bin:/bin",
+    ...mirrored
   };
   delete env.BEADS_DIR;
   delete env.AGENT_RELAY_BEADS_READONLY;
-  return env;
+  delete env.AGENT_RELAY_STDOUT_FILE;
+  delete env.AGENT_RELAY_STDERR_FILE;
+
+  if (!(await bubblewrapSupported())) {
+    if (!allowTestIsolationRunner(providerConfig) || !providerRunsOnNode(providerConfig)) {
+      throw new Error(`provider containment is unavailable for ${providerName}`);
+    }
+    const hookPath = await createTestIsolationHook({
+      bundleRoot: bundle.bundleRoot,
+      writableRoot,
+      blockedCandidates
+    });
+    env.NODE_OPTIONS = [env.NODE_OPTIONS, `--require ${hookPath}`].filter(Boolean).join(" ").trim();
+    return {
+      command: resolvedCommand,
+      args:
+        resolvedCommand === process.execPath || /\bnode(?:js)?$/.test(path.basename(resolvedCommand))
+          ? ["--require", hookPath, ...resolvedArgs]
+          : resolvedArgs,
+      env,
+      captureViaEnv: true,
+      async finalize() {
+        await flush();
+      }
+    };
+  }
+
+  const dirTargets = new Set(["/proc", "/dev", ...parentDirectories(cwd), ...parentDirectories(bundle.bundleRoot)]);
+  for (const target of mounts.keys()) {
+    for (const dir of parentDirectories(target)) {
+      dirTargets.add(dir);
+    }
+  }
+  const bwrapArgs = ["--die-with-parent", "--new-session", "--unshare-all", "--proc", "/proc", "--dev", "/dev"];
+  for (const dir of [...dirTargets].sort((left, right) => left.length - right.length)) {
+    if (dir !== "/") {
+      bwrapArgs.push("--dir", dir);
+    }
+  }
+  for (const [target, mount] of mounts.entries()) {
+    bwrapArgs.push(mount.mode === "rw" ? "--bind" : "--ro-bind", mount.source, target);
+  }
+  bwrapArgs.push("--chdir", cwd, resolvedCommand, ...resolvedArgs);
+  return {
+    command: "/usr/bin/bwrap",
+    args: bwrapArgs,
+    cwd,
+    env,
+    async finalize() {
+      await flush();
+    }
+  };
 }
 
 function candidateReviewProviders({ config, providerNames, requiredVendors, excludedVendor = null, strongOnly = false }) {
@@ -347,6 +792,7 @@ function candidateReviewProviders({ config, providerNames, requiredVendors, excl
     if (!providerConfig) {
       continue;
     }
+    validateRuntimeProviderConfig(providerName, providerConfig, { requireReviewMetadata: true });
     const vendor = providerVendor(providerName, providerConfig);
     if (excludedVendor && vendor === excludedVendor) {
       continue;
@@ -379,7 +825,10 @@ async function runCommandChecked({
   allowMainStatusChange = false,
   allowRemoteChange = false,
   allowHeadChange = false,
-  allowBranchChange = false
+  allowBranchChange = false,
+  inheritEnv = true,
+  captureViaEnv = true,
+  postRun = null
 }) {
   const before = await captureControlPlaneSnapshot(config, projectRoot, worktreePath);
   const run = await runProviderCommand({
@@ -388,8 +837,13 @@ async function runCommandChecked({
     args,
     cwd,
     env,
-    timeoutMs
+    timeoutMs,
+    inheritEnv,
+    captureViaEnv
   });
+  if (postRun) {
+    await postRun(run);
+  }
   const after = await captureControlPlaneSnapshot(config, projectRoot, worktreePath);
   assertStableControlPlane(before, after, label, {
     allowMainStatusChange,
@@ -432,7 +886,7 @@ function gateGroupsForPhase(adapter, phase, riskClass) {
     return routing.implementationByRisk?.[riskClass] || routing.implementationDefault || ["types-and-tests"];
   }
   if (phase === "delivery") {
-    return routing.deliveryFull || ["pre-push"];
+    return routing.deliveryByRisk?.[riskClass] || routing.deliveryDefault || routing.deliveryFull || ["pre-push"];
   }
   if (phase === "human-approval") {
     return routing.humanApproval || [];
@@ -474,31 +928,32 @@ function buildCorrectionReason(findings) {
 
 function buildPlanState({ projectRoot, adapterName, bead, config }) {
   const sanitizedIssue = sanitizeIssueForPrompt(bead);
-  const specHash = computeSpecHash(bead);
+  const policy = resolveBeadPolicy(bead, config);
+  const specHash = computeSpecHash(bead, policy);
   const names = neutralNames(sanitizedIssue.title, specHash);
   return {
     beadId: bead.id,
     adapterName,
     projectRoot,
     phase: "planning",
-    riskClass: bead.riskClass || "normal-code",
+    riskClass: policy.riskClass,
     issue: sanitizedIssue,
     specHash,
-    ownedPaths: Array.isArray(bead.ownedPaths) && bead.ownedPaths.length > 0 ? bead.ownedPaths : ["."],
+    ownedPaths: policy.ownedPaths,
     prohibitedActions: [
       "git mutation by worker",
       "beads write by worker",
       "remote mutation",
       "force push"
     ],
-    gateGroups: bead.gateGroups || [],
+    gateGroups: policy.gateGroups,
     providerCursor: {
       coderIndex: 0,
       reviewProvidersTried: []
     },
     correctionRounds: 0,
     pendingCorrection: null,
-    planReview: defaultPlanReview(config, bead.riskClass || "normal-code", specHash),
+    planReview: defaultPlanReview(policy.approvalRequired, specHash),
     reviewState: {
       requiredVendors: 2,
       completedVendors: [],
@@ -507,6 +962,60 @@ function buildPlanState({ projectRoot, adapterName, bead, config }) {
     neutralNames: names,
     delivery: {
       prUrl: null
+    }
+  };
+}
+
+function mergeRecoveredState({ liveState, recovered, adapter }) {
+  const hashesMatch = recovered.specHash === liveState.specHash;
+  const preserved = {
+    worktreePath: recovered.worktreePath || liveState.worktreePath,
+    baseSha: recovered.baseSha || liveState.baseSha,
+    baseBranch: recovered.baseBranch || liveState.baseBranch,
+    branch: recovered.branch || liveState.branch,
+    setupComplete: recovered.setupComplete || false,
+    snapshotPath: recovered.snapshotPath || liveState.snapshotPath,
+    latestSnapshotPath: recovered.latestSnapshotPath || liveState.latestSnapshotPath,
+    latestDiffArtifact: recovered.latestDiffArtifact || liveState.latestDiffArtifact,
+    latestChangedPaths: recovered.latestChangedPaths || liveState.latestChangedPaths,
+    lastCoder: recovered.lastCoder || liveState.lastCoder,
+    dirtyWorktree: recovered.dirtyWorktree || false,
+    providerCursor: recovered.providerCursor || liveState.providerCursor,
+    timestamps: recovered.timestamps || liveState.timestamps
+  };
+  if (!hashesMatch) {
+    return {
+      ...liveState,
+      ...preserved,
+      phase: "planning",
+      correctionRounds: 0,
+      pendingCorrection: null,
+      gateResults: [],
+      delivery: { prUrl: null },
+      planReview: defaultPlanReview(liveState.planReview.approvalRequired, liveState.specHash),
+      reviewState: {
+        requiredVendors: computeReviewVendorPolicy(adapter, liveState.riskClass).reviewVendors,
+        completedVendors: [],
+        findingsResolved: false
+      }
+    };
+  }
+  return {
+    ...liveState,
+    ...preserved,
+    phase: recovered.phase || liveState.phase,
+    correctionRounds: recovered.correctionRounds || 0,
+    pendingCorrection: recovered.pendingCorrection ?? null,
+    gateResults: recovered.gateResults || liveState.gateResults,
+    delivery: recovered.delivery || liveState.delivery,
+    planReview: {
+      ...(recovered.planReview || liveState.planReview),
+      approvalRequired: liveState.planReview.approvalRequired,
+      approvalSpecHash: liveState.specHash
+    },
+    reviewState: {
+      ...(recovered.reviewState || liveState.reviewState),
+      requiredVendors: computeReviewVendorPolicy(adapter, liveState.riskClass).reviewVendors
     }
   };
 }
@@ -528,7 +1037,7 @@ async function ensurePlannedState({ projectRoot, adapterName, beadId, adapter, e
         ...current,
         ...livePlan,
         phase: "planning",
-        planReview: defaultPlanReview(config, livePlan.riskClass, livePlan.specHash),
+        planReview: defaultPlanReview(livePlan.planReview.approvalRequired, livePlan.specHash),
         reviewState: {
           requiredVendors: computeReviewVendorPolicy(adapter, livePlan.riskClass).reviewVendors,
           completedVendors: [],
@@ -548,7 +1057,7 @@ async function ensurePlannedState({ projectRoot, adapterName, beadId, adapter, e
       specHash: livePlan.specHash,
       neutralNames: livePlan.neutralNames,
       planReview: {
-        ...(current.planReview || defaultPlanReview(config, livePlan.riskClass, livePlan.specHash)),
+        ...(current.planReview || defaultPlanReview(livePlan.planReview.approvalRequired, livePlan.specHash)),
         approvalRequired: livePlan.planReview.approvalRequired,
         approvalSpecHash: livePlan.specHash
       }
@@ -595,10 +1104,7 @@ async function loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, e
   if (!recovered.beadId) {
     return ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   }
-  const state = await writeState(projectRoot, beadId, {
-    ...liveState,
-    ...recovered
-  });
+  const state = await writeState(projectRoot, beadId, mergeRecoveredState({ liveState, recovered, adapter }));
   await appendLedger(projectRoot, beadId, "state-recovered", { source: "bead-comments" });
   return state;
 }
@@ -620,7 +1126,7 @@ async function createWorktreeIfMissing({ projectRoot, beadId, adapter, config, s
   if (before !== after) {
     throw new Error("main checkout drift detected during worktree creation");
   }
-  const snapshot = await captureSnapshot(worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay"] });
+  const snapshot = await captureSnapshot(worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
   const snapshotPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, "setup-snapshot.json");
   await ensureDir(path.dirname(snapshotPath));
   await writeJson(snapshotPath, snapshot);
@@ -666,7 +1172,7 @@ async function withBeadLock({ projectRoot, beadId, action }, fn) {
   const lock = await acquireLock({
     lockPath: lockPathForBead(projectRoot, beadId),
     owner: `${action}:${process.pid}`,
-    staleMs: 2000,
+    staleMs: 30000,
     heartbeatMs: 200
   });
   if (!lock.acquired) {
@@ -704,16 +1210,11 @@ function buildCoderPrompt({ state, gateGroupNames, corrective, reason }) {
   return lines.join("\n");
 }
 
-function buildPlanReviewPrompt({ state, strongReview }) {
-  const issue = state.issue;
+function buildPlanReviewPrompt({ specArtifactPath, strongReview, specHash }) {
   return [
-    "Review only the sanitized Bead specification below.",
-    `Spec hash: ${state.specHash}`,
-    `Title: ${issue.title}`,
-    `Description: ${issue.description}`,
-    `Design: ${issue.design}`,
-    `Acceptance: ${issue.acceptance}`,
-    `Dependencies: ${issue.dependencies.map((dependency) => `${dependency.id}:${dependency.status}`).join(", ") || "none"}`,
+    "Review only the sanitized specification artifact below.",
+    `Spec hash: ${specHash}`,
+    `Specification artifact: ${specArtifactPath}`,
     `Strong review required: ${strongReview ? "yes" : "no"}`,
     "Do not inspect repository files, implementation diffs, or external systems.",
     "Return JSON with status, summary, findings, commandsAttempted."
@@ -821,32 +1322,49 @@ async function runPlanReview({ projectRoot, beadId, state, config, adapter, env 
     });
   }
   const findings = [];
-  const specCwd = await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-${beadId}-`));
   for (const { providerName, providerConfig, vendor } of candidates) {
-    const providerEnv = await buildProviderExecutionEnv({
+    const specContents = [
+      `Spec hash: ${state.specHash}`,
+      `Title: ${state.issue.title}`,
+      `Description: ${state.issue.description}`,
+      `Design: ${state.issue.design}`,
+      `Acceptance: ${state.issue.acceptance}`,
+      `Dependencies: ${state.issue.dependencies.map((dependency) => `${dependency.id}:${dependency.status}`).join(", ") || "none"}`
+    ].join("\n");
+    const isolated = await prepareIsolatedProviderRun({
+      config,
       providerConfig,
       beadId,
       providerName,
-      mode: "read-only"
+      cwd: await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-${beadId}-`)),
+      writableRoot: await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-writable-${beadId}-`)),
+      promptContents: "",
+      copiedArtifacts: []
     });
-    const promptPath = await writeProviderPrompt({
-      projectRoot,
-      beadId,
-      fileName: `plan-review-${providerName}.txt`,
-      contents: buildPlanReviewPrompt({
-        state,
-        strongReview: policy.strongReviewersOnly
-      })
-    });
+    const specArtifactPath = path.join(path.dirname(isolated.env.HOME), "spec.txt");
+    await writeFile(specArtifactPath, `${specContents}\n`, "utf8");
+    const promptPath = path.join(path.dirname(isolated.env.HOME), "prompt.txt");
+    await writeFile(promptPath, `${buildPlanReviewPrompt({
+      specArtifactPath,
+      strongReview: policy.strongReviewersOnly,
+      specHash: state.specHash
+    })}\n`, "utf8");
+    const promptIndex = isolated.args.lastIndexOf(path.join(path.dirname(isolated.env.HOME), "prompt.txt"));
+    if (promptIndex !== -1) {
+      isolated.args[promptIndex] = promptPath;
+    }
     const run = await runCommandChecked({
       config,
       projectRoot,
-      cwd: specCwd,
-      command: providerConfig.command,
-      args: [...(providerConfig.args || []), promptPath],
-      env: providerEnv,
+      cwd: isolated.cwd,
+      command: isolated.command,
+      args: isolated.args,
+      env: isolated.env,
       timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
-      label: `plan-review:${providerName}`
+      label: `plan-review:${providerName}`,
+      inheritEnv: false,
+      captureViaEnv: isolated.captureViaEnv ?? false,
+      postRun: () => isolated.finalize()
     });
     if (run.code !== 0) {
       continue;
@@ -1004,17 +1522,14 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
     let correctionRounds = state.correctionRounds || 0;
     let correctiveReason = state.pendingCorrection || "";
     while (true) {
-      const providerEnv = await buildProviderExecutionEnv({
+      const isolated = await prepareIsolatedProviderRun({
+        config,
         providerConfig,
         beadId,
         providerName,
-        mode: "implementation"
-      });
-      const promptPath = await writeProviderPrompt({
-        projectRoot,
-        beadId,
-        fileName: `implement-${providerName}-${correctionRounds}.txt`,
-        contents: buildCoderPrompt({
+        cwd: state.worktreePath,
+        writableRoot: state.worktreePath,
+        promptContents: buildCoderPrompt({
           state,
           gateGroupNames,
           corrective: Boolean(correctiveReason),
@@ -1026,11 +1541,14 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
         projectRoot,
         cwd: state.worktreePath,
         worktreePath: state.worktreePath,
-        command: providerConfig.command,
-        args: [...(providerConfig.args || []), promptPath],
-        env: providerEnv,
+        command: isolated.command,
+        args: isolated.args,
+        env: isolated.env,
         timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
-        label: `coder:${providerName}`
+        label: `coder:${providerName}`,
+        inheritEnv: false,
+        captureViaEnv: isolated.captureViaEnv ?? false,
+        postRun: () => isolated.finalize()
       });
       let report;
       if (run.code !== 0) {
@@ -1262,39 +1780,52 @@ async function runReviewer({ projectRoot, beadId, state, config, adapter, env })
   }
   const findings = [];
   for (const { providerName, providerConfig, vendor } of candidates) {
-    const providerEnv = await buildProviderExecutionEnv({
+    const beforeSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
+    const isolated = await prepareIsolatedProviderRun({
+      config,
       providerConfig,
       beadId,
       providerName,
-      mode: "read-only"
+      cwd: state.worktreePath,
+      writableRoot: state.worktreePath,
+      promptContents: "",
+      copiedArtifacts: [
+        {
+          sourcePath: state.latestDiffArtifact,
+          fileName: "review-artifact.md"
+        }
+      ]
     });
-    const beforeSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay"] });
-    const promptPath = await writeProviderPrompt({
-      projectRoot,
-      beadId,
-      fileName: `review-${providerName}.txt`,
-      contents: buildReviewPrompt({
-        state,
-        artifactPath: state.latestDiffArtifact,
-        reviewVendor: providerName,
-        strongReview: policy.strongReviewersOnly
-      })
-    });
+    const reviewArtifactPath = path.join(path.dirname(isolated.env.HOME), "review-artifact.md");
+    const promptPath = path.join(path.dirname(isolated.env.HOME), "prompt.txt");
+    await writeFile(promptPath, `${buildReviewPrompt({
+      state,
+      artifactPath: reviewArtifactPath,
+      reviewVendor: providerName,
+      strongReview: policy.strongReviewersOnly
+    })}\n`, "utf8");
+    const promptIndex = isolated.args.lastIndexOf(path.join(path.dirname(isolated.env.HOME), "prompt.txt"));
+    if (promptIndex !== -1) {
+      isolated.args[promptIndex] = promptPath;
+    }
     const run = await runCommandChecked({
       config,
       projectRoot,
       cwd: state.worktreePath,
       worktreePath: state.worktreePath,
-      command: providerConfig.command,
-      args: [...(providerConfig.args || []), promptPath],
-      env: providerEnv,
+      command: isolated.command,
+      args: isolated.args,
+      env: isolated.env,
       timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
-      label: `reviewer:${providerName}`
+      label: `reviewer:${providerName}`,
+      inheritEnv: false,
+      captureViaEnv: isolated.captureViaEnv ?? false,
+      postRun: () => isolated.finalize()
     });
     if (run.code !== 0) {
       continue;
     }
-    const afterSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay"] });
+    const afterSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
     if (sha256Json(beforeSnapshot) !== sha256Json(afterSnapshot)) {
       throw new Error(`reviewer mutated worktree contents during ${providerName}`);
     }
@@ -1407,6 +1938,17 @@ async function deliverReviewedWork({ projectRoot, beadId, state, config, adapter
   });
   if (stageRun.code !== 0) {
     throw new Error(`git add failed: ${stageRun.stderr || stageRun.stdout}`);
+  }
+  const stagedArtifactPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, "staged-index-diff.md");
+  await buildStagedDiffArtifact({
+    config,
+    worktreePath: state.worktreePath,
+    changedPaths: verifiedDiff.changedPaths,
+    filePath: stagedArtifactPath
+  });
+  const stagedArtifactHash = sha256Text(await readFile(stagedArtifactPath, "utf8"));
+  if (stagedArtifactHash !== state.reviewState?.reviewedArtifactHash) {
+    throw new Error("staged index no longer matches the reviewed artifact");
   }
   const commitRun = await runCommandChecked({
     config,
@@ -1744,4 +2286,12 @@ export async function resume(args) {
 
 export async function cleanup(args) {
   return withBeadLock({ projectRoot: args.projectRoot, beadId: args.beadId, action: "cleanup" }, () => cleanupUnlocked(args));
+}
+
+export function __setTestIsolationRunnerForTests(enabled) {
+  testIsolationRunnerEnabled = Boolean(enabled);
+}
+
+export function __resetTestIsolationRunnerForTests() {
+  testIsolationRunnerEnabled = false;
 }

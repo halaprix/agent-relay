@@ -46,7 +46,9 @@ export async function runProviderCommand({
   args = [],
   cwd,
   env = {},
-  timeoutMs
+  timeoutMs,
+  inheritEnv = true,
+  captureViaEnv = true
 }) {
   const resolvedCommand = command.endsWith(".mjs") || command.endsWith(".js") ? process.execPath : command;
   const resolvedArgs =
@@ -61,11 +63,15 @@ export async function runProviderCommand({
     const child = spawn(resolvedCommand, resolvedArgs, {
       cwd,
       env: {
-        ...process.env,
+        ...(inheritEnv ? process.env : {}),
         ...env,
         AGENT_RELAY_PROVIDER: providerName,
-        AGENT_RELAY_STDOUT_FILE: stdoutPath,
-        AGENT_RELAY_STDERR_FILE: stderrPath
+        ...(captureViaEnv
+          ? {
+              AGENT_RELAY_STDOUT_FILE: stdoutPath,
+              AGENT_RELAY_STDERR_FILE: stderrPath
+            }
+          : {})
       },
       stdio: ["ignore", "pipe", "pipe"],
       detached: true
