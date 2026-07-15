@@ -31,8 +31,9 @@ import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, 
 import { syncRoleBundles } from "./roles.mjs";
 import { validateReviewReport, validateWorkerReport } from "./validate.mjs";
 
-const SUPPORTED_REVIEW_VENDORS = new Set(["anthropic", "openai", "google"]);
+const SUPPORTED_PROVIDER_VENDORS = new Set(["anthropic", "openai", "google"]);
 let bubblewrapSupportPromise;
+let bubblewrapSupportOverride = null;
 let testIsolationRunnerEnabled = false;
 
 function nowIso() {
@@ -359,7 +360,7 @@ function providerVendor(providerName, providerConfig) {
     return null;
   }
   const vendor = providerConfig.vendor.trim().toLowerCase();
-  return SUPPORTED_REVIEW_VENDORS.has(vendor) ? vendor : null;
+  return SUPPORTED_PROVIDER_VENDORS.has(vendor) ? vendor : null;
 }
 
 function providerStrength(providerConfig) {
@@ -382,10 +383,20 @@ function validateRuntimeProviderConfig(providerName, providerConfig, { requireRe
   if (providerConfig.env !== undefined && (providerConfig.env === null || typeof providerConfig.env !== "object" || Array.isArray(providerConfig.env))) {
     throw new Error(`provider ${providerName}.env must be an object`);
   }
-  if (requireReviewMetadata) {
-    if (!providerVendor(providerName, providerConfig)) {
-      throw new Error(`provider ${providerName}.vendor must be configured explicitly for review`);
+  if (!providerVendor(providerName, providerConfig)) {
+    throw new Error(`provider ${providerName}.vendor must be configured explicitly to one of ${[...SUPPORTED_PROVIDER_VENDORS].join(", ")}`);
+  }
+  if (providerConfig.runtime !== undefined) {
+    if (providerConfig.runtime === null || typeof providerConfig.runtime !== "object" || Array.isArray(providerConfig.runtime)) {
+      throw new Error(`provider ${providerName}.runtime must be an object`);
     }
+    if (providerConfig.runtime.readOnlyMounts !== undefined) {
+      if (!Array.isArray(providerConfig.runtime.readOnlyMounts) || providerConfig.runtime.readOnlyMounts.some((mountPath) => typeof mountPath !== "string" || !path.isAbsolute(mountPath))) {
+        throw new Error(`provider ${providerName}.runtime.readOnlyMounts must be an array of absolute paths`);
+      }
+    }
+  }
+  if (requireReviewMetadata) {
     if (!providerStrength(providerConfig)) {
       throw new Error(`provider ${providerName}.strength must be configured explicitly for review`);
     }
@@ -405,6 +416,13 @@ async function resolveCommandPath(command, pathValue = process.env.PATH || "") {
   throw new Error(`unable to resolve command path for ${command}`);
 }
 
+async function resolvePathForMount(targetPath) {
+  if (!(await pathExists(targetPath))) {
+    throw new Error(`runtime mount path does not exist: ${targetPath}`);
+  }
+  return realpath(targetPath);
+}
+
 function parentDirectories(targetPath) {
   const dirs = [];
   let current = path.dirname(targetPath);
@@ -420,6 +438,33 @@ function parentDirectories(targetPath) {
 
 function isUnderAnyRoot(targetPath, roots) {
   return roots.some((root) => targetPath === root || targetPath.startsWith(`${root}${path.sep}`));
+}
+
+async function protectedRuntimeRoots({ projectRoot, config, adapter, writableRoot }) {
+  const roots = new Set();
+  const candidates = [
+    projectRoot,
+    config.mainCheckoutRoot || projectRoot,
+    writableRoot,
+    adapter.beads.requiredDir,
+    projectStateRoot(projectRoot)
+  ];
+  for (const baseRoot of [projectRoot, config.mainCheckoutRoot || projectRoot, writableRoot]) {
+    for (const protectedPath of adapter.controlPlane.protectedPaths || []) {
+      candidates.push(path.join(baseRoot, protectedPath));
+    }
+  }
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    if (await pathExists(candidate)) {
+      roots.add(await realpath(candidate));
+    } else {
+      roots.add(path.resolve(candidate));
+    }
+  }
+  return [...roots];
 }
 
 async function writeExecutable(filePath, body) {
@@ -439,11 +484,24 @@ function providerRunsOnNode(providerConfig) {
 }
 
 async function bubblewrapSupported() {
+  if (typeof bubblewrapSupportOverride === "boolean") {
+    return bubblewrapSupportOverride;
+  }
   if (bubblewrapSupportPromise) {
     return bubblewrapSupportPromise;
   }
   bubblewrapSupportPromise = (async () => {
     if (!(await pathExists("/usr/bin/bwrap"))) {
+      return false;
+    }
+    let resolvedProbeCommand = null;
+    for (const candidate of ["/usr/bin/true", "/bin/true", "/usr/bin/env"]) {
+      if (await pathExists(candidate)) {
+        resolvedProbeCommand = candidate;
+        break;
+      }
+    }
+    if (!resolvedProbeCommand) {
       return false;
     }
     const probeDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-bwrap-probe-"));
@@ -454,6 +512,7 @@ async function bubblewrapSupported() {
         "--die-with-parent",
         "--new-session",
         "--unshare-all",
+        "--share-net",
         "--proc",
         "/proc",
         "--dev",
@@ -477,9 +536,7 @@ async function bubblewrapSupported() {
         probeDir,
         "--chdir",
         probeDir,
-        process.execPath,
-        "-e",
-        "process.exit(0)"
+        resolvedProbeCommand
       ],
       cwd: probeDir,
       env: {},
@@ -630,7 +687,7 @@ async function mirrorProviderEnvFiles(env, writableRoot, providerName) {
       continue;
     }
     const targetPath = env[key];
-    const mirrorPath = path.join(writableRoot, ".agent-relay-sandbox", providerName, path.basename(targetPath));
+    const mirrorPath = path.join(writableRoot, "mirrors", providerName, path.basename(targetPath));
     await ensureDir(path.dirname(mirrorPath));
     if (await pathExists(targetPath)) {
       await copyFile(targetPath, mirrorPath);
@@ -666,7 +723,10 @@ async function createProviderBundle({ beadId, providerName, promptContents, copi
 }
 
 async function prepareIsolatedProviderRun({
+  projectRoot,
+  adapter,
   config,
+  supervisorEnv = process.env,
   providerConfig,
   beadId,
   providerName,
@@ -677,8 +737,11 @@ async function prepareIsolatedProviderRun({
 }) {
   validateRuntimeProviderConfig(providerName, providerConfig);
   const bundle = await createProviderBundle({ beadId, providerName, promptContents, copiedArtifacts });
-  const { mirrored, flush } = await mirrorProviderEnvFiles(providerConfig.env || {}, writableRoot, providerName);
+  const sandboxRoot = path.join(writableRoot, ".agent-relay-sandbox", `${providerName}-${Date.now()}-${process.pid}`);
+  await ensureDir(path.join(sandboxRoot, "home"));
+  const { mirrored, flush } = await mirrorProviderEnvFiles(providerConfig.env || {}, sandboxRoot, providerName);
   const pathValue = mirrored.PATH || process.env.PATH || "";
+  const supervisorPathValue = supervisorEnv.PATH || process.env.PATH || "";
   const originalCommand = providerConfig.command;
   const absoluteCommand = await resolveCommandPath(originalCommand, pathValue);
   const commandArgs = providerConfig.args || [];
@@ -688,7 +751,6 @@ async function prepareIsolatedProviderRun({
       ? [absoluteCommand, ...commandArgs, bundle.promptPath]
       : [...commandArgs, bundle.promptPath];
   const mounts = new Map();
-  const writableMounts = new Set([writableRoot]);
   for (const systemDir of ["/usr", "/bin", "/lib", "/lib64", "/etc"]) {
     if (await pathExists(systemDir)) {
       mounts.set(systemDir, { source: systemDir, mode: "ro" });
@@ -696,6 +758,38 @@ async function prepareIsolatedProviderRun({
   }
   mounts.set(bundle.bundleRoot, { source: bundle.bundleRoot, mode: "ro" });
   mounts.set(writableRoot, { source: writableRoot, mode: "rw" });
+
+  let resolvedBeadsDir = null;
+  let resolvedBdCommand = null;
+  if (await pathExists(adapter.beads.requiredDir)) {
+    resolvedBeadsDir = await resolvePathForMount(adapter.beads.requiredDir);
+  }
+  const bdCandidate = supervisorEnv.AGENT_RELAY_BD_BIN || "bd";
+  try {
+    resolvedBdCommand = await resolveCommandPath(bdCandidate, supervisorPathValue);
+  } catch {
+    resolvedBdCommand = null;
+  }
+  if (resolvedBeadsDir) {
+    mounts.set(resolvedBeadsDir, { source: resolvedBeadsDir, mode: "ro" });
+  }
+  if (resolvedBdCommand && !isUnderAnyRoot(resolvedBdCommand, [...mounts.keys()])) {
+    mounts.set(resolvedBdCommand, { source: resolvedBdCommand, mode: "ro" });
+  }
+
+  const runtimeRoots = await protectedRuntimeRoots({
+    projectRoot,
+    config,
+    adapter,
+    writableRoot
+  });
+  for (const mountPath of providerConfig.runtime?.readOnlyMounts || []) {
+    const resolvedMountPath = await resolvePathForMount(mountPath);
+    if (isUnderAnyRoot(resolvedMountPath, runtimeRoots)) {
+      throw new Error(`provider ${providerName}.runtime.readOnlyMounts cannot overlap protected project, worktree, Beads, or control-plane paths: ${mountPath}`);
+    }
+    mounts.set(resolvedMountPath, { source: resolvedMountPath, mode: "ro" });
+  }
 
   const providerFiles = [resolvedCommand, ...resolvedArgs.filter((arg) => path.isAbsolute(arg))];
   for (const providerFile of providerFiles) {
@@ -708,7 +802,7 @@ async function prepareIsolatedProviderRun({
   const blockedRoot = path.join(bundle.bundleRoot, "blocked");
   const denyBody = (name) => `#!/usr/bin/env sh\necho "${name} is blocked by agent-relay supervision" >&2\nexit 1\n`;
   const blockedCandidates = new Map();
-  for (const candidate of [config.git?.command, config.github?.command, mirrored.AGENT_RELAY_BD_BIN, "git", "gh", "bd"].filter(Boolean)) {
+  for (const candidate of [config.git?.command, config.github?.command, "git", "gh"].filter(Boolean)) {
     try {
       const resolved = await resolveCommandPath(candidate, pathValue);
       blockedCandidates.set(resolved, path.basename(resolved));
@@ -719,21 +813,22 @@ async function prepareIsolatedProviderRun({
   for (const [resolvedPath, name] of blockedCandidates) {
     const denyPath = path.join(blockedRoot, name);
     await writeExecutable(denyPath, denyBody(name));
-    mounts.set(resolvedPath, { source: denyPath, mode: "rw" });
+    mounts.set(resolvedPath, { source: denyPath, mode: "ro" });
   }
 
   const env = {
-    HOME: path.join(bundle.bundleRoot, "home"),
+    HOME: path.join(sandboxRoot, "home"),
     LANG: process.env.LANG || "C.UTF-8",
     PATH: mirrored.PATH || process.env.PATH || "/usr/bin:/bin",
     ...mirrored
   };
-  delete env.BEADS_DIR;
-  delete env.AGENT_RELAY_BEADS_READONLY;
-  delete env.AGENT_RELAY_STDOUT_FILE;
-  delete env.AGENT_RELAY_STDERR_FILE;
 
   if (!(await bubblewrapSupported())) {
+    delete env.BEADS_DIR;
+    delete env.AGENT_RELAY_BD_BIN;
+    delete env.AGENT_RELAY_BEADS_READONLY;
+    delete env.AGENT_RELAY_STDOUT_FILE;
+    delete env.AGENT_RELAY_STDERR_FILE;
     if (!allowTestIsolationRunner(providerConfig) || !providerRunsOnNode(providerConfig)) {
       throw new Error(`provider containment is unavailable for ${providerName}`);
     }
@@ -757,13 +852,23 @@ async function prepareIsolatedProviderRun({
     };
   }
 
+  if (resolvedBeadsDir) {
+    env.BEADS_DIR = resolvedBeadsDir;
+    env.AGENT_RELAY_BEADS_READONLY = "1";
+  }
+  if (resolvedBdCommand) {
+    env.AGENT_RELAY_BD_BIN = resolvedBdCommand;
+  }
+  delete env.AGENT_RELAY_STDOUT_FILE;
+  delete env.AGENT_RELAY_STDERR_FILE;
+
   const dirTargets = new Set(["/proc", "/dev", ...parentDirectories(cwd), ...parentDirectories(bundle.bundleRoot)]);
   for (const target of mounts.keys()) {
     for (const dir of parentDirectories(target)) {
       dirTargets.add(dir);
     }
   }
-  const bwrapArgs = ["--die-with-parent", "--new-session", "--unshare-all", "--proc", "/proc", "--dev", "/dev"];
+  const bwrapArgs = ["--die-with-parent", "--new-session", "--unshare-all", "--share-net", "--proc", "/proc", "--dev", "/dev"];
   for (const dir of [...dirTargets].sort((left, right) => left.length - right.length)) {
     if (dir !== "/") {
       bwrapArgs.push("--dir", dir);
@@ -1201,7 +1306,7 @@ function buildCoderPrompt({ state, gateGroupNames, corrective, reason }) {
     `Prohibited actions: ${state.prohibitedActions.join(", ")}`,
     `Gate groups: ${gateGroupNames.length > 0 ? gateGroupNames.join(", ") : "none"}`,
     "Output schema: JSON object with required status, summary, ownedPaths, commandsAttempted, changedPaths, and optional gatesClaimed, artifacts.",
-    "Worker constraints: use BEADS_DIR only for readonly context, do not write Beads, Git, remotes, or PRs.",
+    "Worker constraints: when BEADS_DIR is available it is mounted read-only; if you inspect Beads, use `bd --readonly ...`. Under fallback containment BEADS_DIR may be unavailable. Do not write Beads, Git, remotes, or PRs.",
     "Do not read or modify files outside the assigned worktree."
   ];
   if (corrective) {
@@ -1332,7 +1437,10 @@ async function runPlanReview({ projectRoot, beadId, state, config, adapter, env 
       `Dependencies: ${state.issue.dependencies.map((dependency) => `${dependency.id}:${dependency.status}`).join(", ") || "none"}`
     ].join("\n");
     const isolated = await prepareIsolatedProviderRun({
+      projectRoot,
+      adapter,
       config,
+      supervisorEnv: env,
       providerConfig,
       beadId,
       providerName,
@@ -1523,7 +1631,10 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
     let correctiveReason = state.pendingCorrection || "";
     while (true) {
       const isolated = await prepareIsolatedProviderRun({
+        projectRoot,
+        adapter,
         config,
+        supervisorEnv: env,
         providerConfig,
         beadId,
         providerName,
@@ -1782,7 +1893,10 @@ async function runReviewer({ projectRoot, beadId, state, config, adapter, env })
   for (const { providerName, providerConfig, vendor } of candidates) {
     const beforeSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
     const isolated = await prepareIsolatedProviderRun({
+      projectRoot,
+      adapter,
       config,
+      supervisorEnv: env,
       providerConfig,
       beadId,
       providerName,
@@ -2288,10 +2402,24 @@ export async function cleanup(args) {
   return withBeadLock({ projectRoot: args.projectRoot, beadId: args.beadId, action: "cleanup" }, () => cleanupUnlocked(args));
 }
 
+export async function __prepareIsolatedProviderRunForTests(args) {
+  return prepareIsolatedProviderRun(args);
+}
+
 export function __setTestIsolationRunnerForTests(enabled) {
   testIsolationRunnerEnabled = Boolean(enabled);
 }
 
 export function __resetTestIsolationRunnerForTests() {
   testIsolationRunnerEnabled = false;
+}
+
+export function __setBubblewrapSupportForTests(supported) {
+  bubblewrapSupportOverride = supported;
+  bubblewrapSupportPromise = null;
+}
+
+export function __resetBubblewrapSupportForTests() {
+  bubblewrapSupportOverride = null;
+  bubblewrapSupportPromise = null;
 }

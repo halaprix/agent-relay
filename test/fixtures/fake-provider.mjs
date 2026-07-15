@@ -21,6 +21,7 @@ const call = {
 if (step.captureEnv) {
   call.env = {
     BEADS_DIR: process.env.BEADS_DIR ?? null,
+    AGENT_RELAY_BD_BIN: process.env.AGENT_RELAY_BD_BIN ?? null,
     PATH: process.env.PATH ?? null
   };
 }

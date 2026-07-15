@@ -7,3 +7,7 @@ export function sha256Json(value) {
 export function sha256Text(value) {
   return createHash("sha256").update(String(value)).digest("hex");
 }
+
+export function sha256Bytes(value) {
+  return createHash("sha256").update(value).digest("hex");
+}

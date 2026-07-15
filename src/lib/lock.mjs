@@ -1,22 +1,23 @@
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { ensureDir, pathExists } from "./fs.mjs";
-
-async function writeAtomic(filePath, value) {
-  await ensureDir(path.dirname(filePath));
-  const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tmpPath, value, "utf8");
-  await rename(tmpPath, filePath);
-}
 
 async function readLockFile(lockPath) {
   if (!(await pathExists(lockPath))) {
     return null;
   }
   try {
-    return JSON.parse(await readFile(lockPath, "utf8"));
+    const [contents, stats] = await Promise.all([
+      readFile(lockPath, "utf8"),
+      stat(lockPath)
+    ]);
+    const parsed = JSON.parse(contents);
+    return {
+      ...parsed,
+      heartbeatAt: stats.mtimeMs
+    };
   } catch {
     return null;
   }
@@ -48,16 +49,29 @@ function isProcessAlive(pid) {
   }
 }
 
-async function writeLockRecord(lockPath, lockRecord, token) {
-  const diskLock = await readLockFile(lockPath);
-  if (diskLock?.token !== token) {
-    return false;
+async function createLockCandidate(lockPath, lockRecord) {
+  const candidatePath = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
+  await writeFile(candidatePath, `${JSON.stringify(lockRecord, null, 2)}\n`, "utf8");
+  const handle = await open(candidatePath, "r+");
+  return { candidatePath, handle };
+}
+
+async function publishCandidate(lockPath, candidatePath) {
+  try {
+    await link(candidatePath, lockPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST" || error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
-  await writeAtomic(lockPath, `${JSON.stringify(lockRecord, null, 2)}\n`);
-  return true;
 }
 
 function canTakeOver(lockRecord, staleMs) {
+  if (!lockRecord) {
+    return { allowed: true, reason: "missing-lock" };
+  }
   if (!isHeartbeatStale(lockRecord, staleMs)) {
     return { allowed: false, reason: "heartbeat-fresh" };
   }
@@ -70,22 +84,21 @@ function canTakeOver(lockRecord, staleMs) {
   return { allowed: true, reason: "owner-dead" };
 }
 
-async function attemptTakeover(lockPath, currentLock) {
-  const takenOverPath = `${lockPath}.taken-over.${randomUUID()}`;
+async function displaceStaleLock(lockPath, currentLock) {
+  const displacedPath = `${lockPath}.stale.${randomUUID()}`;
   try {
-    await rename(lockPath, takenOverPath);
+    await rename(lockPath, displacedPath);
   } catch {
-    return false;
+    return null;
   }
-  const displaced = await readLockFile(takenOverPath);
+  const displaced = await readLockFile(displacedPath);
   const displacedToken = displaced?.token || null;
   const expectedToken = currentLock?.token || null;
   if (expectedToken && displacedToken && displacedToken !== expectedToken) {
-    await rename(takenOverPath, lockPath).catch(() => {});
-    return false;
+    await rename(displacedPath, lockPath).catch(() => {});
+    return null;
   }
-  await rm(takenOverPath, { force: true }).catch(() => {});
-  return true;
+  return displacedPath;
 }
 
 export async function acquireLock({
@@ -97,54 +110,71 @@ export async function acquireLock({
   await ensureDir(path.dirname(lockPath));
   const token = randomUUID();
   const host = os.hostname();
+  const currentLock = {
+    token,
+    owner,
+    host,
+    pid: process.pid,
+    heartbeatAt: Date.now()
+  };
+  const candidate = await createLockCandidate(lockPath, currentLock);
   let recoveredStale = false;
-  let currentLock = null;
+  let acquired = false;
 
-  while (true) {
-    try {
-      const handle = await open(lockPath, "wx");
-      currentLock = {
-        token,
-        owner,
-        host,
-        pid: process.pid,
-        heartbeatAt: Date.now()
-      };
-      await handle.writeFile(`${JSON.stringify(currentLock, null, 2)}\n`, "utf8");
-      await handle.close();
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") {
-        throw error;
+  try {
+    while (true) {
+      if (await publishCandidate(lockPath, candidate.candidatePath)) {
+        acquired = true;
+        break;
       }
-      currentLock = await readLockFile(lockPath);
-      const takeover = canTakeOver(currentLock, staleMs);
+      const incumbentLock = await readLockFile(lockPath);
+      const takeover = canTakeOver(incumbentLock, staleMs);
       if (!takeover.allowed) {
+        await candidate.handle.close().catch(() => {});
+        await rm(candidate.candidatePath, { force: true }).catch(() => {});
         return {
           acquired: false,
           recoveredStale,
-          currentLock,
+          currentLock: incumbentLock,
           reason: takeover.reason
         };
       }
-      const tookOver = await attemptTakeover(lockPath, currentLock);
-      if (!tookOver) {
+      const displacedPath = await displaceStaleLock(lockPath, incumbentLock);
+      if (!displacedPath) {
         continue;
       }
-      recoveredStale = true;
+      if (await publishCandidate(lockPath, candidate.candidatePath)) {
+        recoveredStale = true;
+        acquired = true;
+        await rm(displacedPath, { force: true }).catch(() => {});
+        break;
+      }
+      await rm(displacedPath, { force: true }).catch(() => {});
     }
+  } catch (error) {
+    await candidate.handle.close().catch(() => {});
+    await rm(candidate.candidatePath, { force: true }).catch(() => {});
+    throw error;
   }
+
+  if (!acquired) {
+    await candidate.handle.close().catch(() => {});
+    await rm(candidate.candidatePath, { force: true }).catch(() => {});
+    throw new Error(`failed to acquire lock ${lockPath}`);
+  }
+
+  await rm(candidate.candidatePath, { force: true }).catch(() => {});
 
   const heartbeat = setInterval(async () => {
     try {
-      currentLock = {
-        ...currentLock,
-        heartbeatAt: Date.now()
-      };
-      const wrote = await writeLockRecord(lockPath, currentLock, token);
-      if (!wrote) {
+      const diskLock = await readLockFile(lockPath);
+      if (diskLock?.token !== token) {
         clearInterval(heartbeat);
+        return;
       }
+      const now = new Date();
+      await candidate.handle.utimes(now, now);
+      currentLock.heartbeatAt = now.getTime();
     } catch {
       // Release handles cleanup; heartbeat is best-effort.
     }
@@ -157,9 +187,13 @@ export async function acquireLock({
     currentLock,
     async release() {
       clearInterval(heartbeat);
-      const diskLock = await readLockFile(lockPath);
-      if (diskLock?.token === token) {
-        await rm(lockPath, { force: true });
+      try {
+        const diskLock = await readLockFile(lockPath);
+        if (diskLock?.token === token) {
+          await rm(lockPath, { force: true });
+        }
+      } finally {
+        await candidate.handle.close().catch(() => {});
       }
     }
   };

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import path from "node:path";
-import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
 
 const storePath = process.env.FAKE_GIT_STORE;
 const stdoutFile = process.env.AGENT_RELAY_STDOUT_FILE;
@@ -20,12 +20,20 @@ async function save() {
   await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
 }
 
-async function out(text) {
+async function out(payload) {
   if (stdoutFile) {
-    await writeFile(stdoutFile, text, "utf8");
+    await writeFile(stdoutFile, payload);
     return;
   }
-  process.stdout.write(text);
+  await new Promise((resolve, reject) => {
+    process.stdout.end(payload, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 async function err(text) {
@@ -33,10 +41,37 @@ async function err(text) {
     await writeFile(stderrFile, text, "utf8");
     return;
   }
-  process.stderr.write(text);
+  await new Promise((resolve, reject) => {
+    process.stderr.end(text, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 store.records.commands.push({ cwd: process.cwd(), args });
+
+async function readIndexRecord(relativePath) {
+  const absolutePath = path.join(process.cwd(), relativePath);
+  const stats = await lstat(absolutePath);
+  if (stats.isSymbolicLink()) {
+    const symlinkTarget = await readlink(absolutePath);
+    return {
+      mode: "120000",
+      contentBase64: Buffer.from(symlinkTarget, "utf8").toString("base64"),
+      symlinkTarget
+    };
+  }
+  const bytes = await readFile(absolutePath);
+  return {
+    mode: (stats.mode & 0o111) !== 0 ? "100755" : "100644",
+    contentBase64: bytes.toString("base64"),
+    symlinkTarget: null
+  };
+}
 
 if (args[0] === "status") {
   const value = process.cwd() === store.projectRoot
@@ -110,8 +145,24 @@ if (args[0] === "add") {
   const paths = args.slice(args.indexOf("--") + 1);
   const worktree = store.worktrees[process.cwd()];
   worktree.index ||= {};
+  worktree.objects ||= {};
+  worktree.objectCounter ||= 0;
   for (const relativePath of paths) {
-    worktree.index[relativePath] = await readFile(path.join(process.cwd(), relativePath), "utf8");
+    try {
+      const record = await readIndexRecord(relativePath);
+      const objectId = `blob-${process.cwd().replaceAll(path.sep, "_")}-${worktree.objectCounter + 1}`;
+      worktree.objectCounter += 1;
+      worktree.index[relativePath] = {
+        objectId,
+        ...record
+      };
+      worktree.objects[objectId] = worktree.index[relativePath];
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+      delete worktree.index[relativePath];
+    }
   }
   store.records.staged.push({ cwd: process.cwd(), paths });
   if (store.postAddMutation) {
@@ -124,12 +175,39 @@ if (args[0] === "add") {
 if (args[0] === "show" && typeof args[1] === "string" && args[1].startsWith(":")) {
   const worktree = store.worktrees[process.cwd()];
   const relativePath = args[1].slice(1);
-  const content = worktree?.index?.[relativePath];
-  if (content === undefined) {
+  const record = worktree?.index?.[relativePath];
+  if (record === undefined) {
     await err(`missing staged path ${relativePath}\n`);
     process.exit(1);
   }
-  await out(content);
+  await out(Buffer.from(record.contentBase64, "base64"));
+  process.exit(0);
+}
+
+if (args[0] === "ls-files" && args[1] === "--stage" && args[2] === "-z") {
+  const worktree = store.worktrees[process.cwd()];
+  const paths = args.slice(args.indexOf("--") + 1);
+  const entries = [];
+  for (const relativePath of paths) {
+    const record = worktree?.index?.[relativePath];
+    if (!record) {
+      continue;
+    }
+    entries.push(`${record.mode} ${record.objectId} 0\t${relativePath}\0`);
+  }
+  await out(entries.join(""));
+  process.exit(0);
+}
+
+if (args[0] === "cat-file" && args[1] === "-p") {
+  const worktree = store.worktrees[process.cwd()];
+  const objectId = args[2];
+  const record = worktree?.objects?.[objectId];
+  if (!record) {
+    await err(`missing object ${objectId}\n`);
+    process.exit(1);
+  }
+  await out(Buffer.from(record.contentBase64, "base64"));
   process.exit(0);
 }
 

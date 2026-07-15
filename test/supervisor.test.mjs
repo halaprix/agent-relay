@@ -5,10 +5,14 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { loadAdapter } from "../src/lib/adapter.mjs";
 import { projectStateRoot, repoPath, runStatePath } from "../src/lib/paths.mjs";
 import { pathExists, removePath } from "../src/lib/fs.mjs";
 import {
+  __prepareIsolatedProviderRunForTests,
+  __resetBubblewrapSupportForTests,
   __resetTestIsolationRunnerForTests,
+  __setBubblewrapSupportForTests,
   __setTestIsolationRunnerForTests,
   cleanup,
   doctor,
@@ -36,6 +40,7 @@ const execFile = promisify(execFileCallback);
 __setTestIsolationRunnerForTests(true);
 test.after(() => {
   __resetTestIsolationRunnerForTests();
+  __resetBubblewrapSupportForTests();
 });
 
 function relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra = {} }) {
@@ -126,6 +131,15 @@ function successReviewStep(summary = "clean review", findings = []) {
   };
 }
 
+function indexOfMount(args, targetPath) {
+  for (let index = 0; index < args.length - 2; index += 1) {
+    if ((args[index] === "--bind" || args[index] === "--ro-bind") && args[index + 2] === targetPath) {
+      return index;
+    }
+  }
+  return -1;
+}
+
 async function mutateBdStore(storePath, mutate) {
   const store = JSON.parse(await readFile(storePath, "utf8"));
   mutate(store);
@@ -168,6 +182,114 @@ test("doctor honors the requested adapter and validates required files", { timeo
   const result = await doctor({ projectRoot, adapterName: "example-app" });
   assert.equal(result.ok, true);
   assert.equal(result.adapter, "example-app");
+});
+
+test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bubblewrap mounts with share-net, readonly blockers, and a writable sandbox HOME", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const bdStorePath = await createFakeBdStore();
+  const gitStorePath = await createFakeGitStore(projectRoot);
+  const shimDir = await createGateShimPath();
+  const providerStorePath = await createFakeProviderStore([]);
+  const { adapter } = await loadAdapter("example-app");
+  const config = baseConfig(projectRoot, gitStorePath);
+  const supervisorEnv = relayEnv({ bdStorePath, gitStorePath });
+
+  await assert.rejects(
+    () =>
+      __prepareIsolatedProviderRunForTests({
+        projectRoot,
+        adapter,
+        config,
+        supervisorEnv,
+        providerConfig: {
+          command: process.execPath,
+          args: [repoPath("test", "fixtures", "fake-provider.mjs")],
+          env: {
+            FAKE_PROVIDER_STORE: providerStorePath,
+            PATH: `${shimDir}:${process.env.PATH}`
+          }
+        },
+        beadId: "example-app-123",
+        providerName: "claude",
+        cwd: projectRoot,
+        writableRoot: projectRoot,
+        promptContents: "test prompt"
+      }),
+    /vendor must be configured explicitly/
+  );
+
+  __setBubblewrapSupportForTests(true);
+  try {
+    const isolated = await __prepareIsolatedProviderRunForTests({
+      projectRoot,
+      adapter,
+      config,
+      supervisorEnv,
+      providerConfig: {
+        ...fakeProviderConfig({
+          storePath: providerStorePath,
+          shimDir,
+          vendor: "Anthropic"
+        }),
+        runtime: {
+          readOnlyMounts: [shimDir]
+        }
+      },
+      beadId: "example-app-123",
+      providerName: "claude",
+      cwd: projectRoot,
+      writableRoot: projectRoot,
+      promptContents: "test prompt"
+    });
+
+    assert.equal(isolated.command, "/usr/bin/bwrap");
+    assert.match(isolated.env.HOME, new RegExp(`^${projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.agent-relay-sandbox/`));
+    assert.equal(isolated.args.includes("--share-net"), true);
+    assert.equal(isolated.env.BEADS_DIR, "/home/example-user/.example-beads");
+    assert.equal(isolated.env.AGENT_RELAY_BD_BIN, repoPath("test", "fixtures", "fake-bd.mjs"));
+    const runtimeMountIndex = indexOfMount(isolated.args, shimDir);
+    assert.notEqual(runtimeMountIndex, -1);
+    assert.equal(isolated.args[runtimeMountIndex], "--ro-bind");
+    const beadsMountIndex = indexOfMount(isolated.args, "/home/example-user/.example-beads");
+    assert.notEqual(beadsMountIndex, -1);
+    assert.equal(isolated.args[beadsMountIndex], "--ro-bind");
+    const bdMountIndex = indexOfMount(isolated.args, repoPath("test", "fixtures", "fake-bd.mjs"));
+    assert.notEqual(bdMountIndex, -1);
+    assert.equal(isolated.args[bdMountIndex], "--ro-bind");
+
+    const blockedGitTarget = repoPath("test", "fixtures", "fake-git-driver.mjs");
+    const blockedGitMountIndex = indexOfMount(isolated.args, blockedGitTarget);
+    assert.notEqual(blockedGitMountIndex, -1);
+    assert.equal(isolated.args[blockedGitMountIndex], "--ro-bind");
+
+    await assert.rejects(
+      () =>
+        __prepareIsolatedProviderRunForTests({
+          projectRoot,
+          adapter,
+          config,
+          supervisorEnv,
+          providerConfig: {
+            ...fakeProviderConfig({
+              storePath: providerStorePath,
+              shimDir,
+              vendor: "anthropic"
+            }),
+            runtime: {
+              readOnlyMounts: [projectRoot]
+            }
+          },
+          beadId: "example-app-123",
+          providerName: "claude",
+          cwd: projectRoot,
+          writableRoot: projectRoot,
+          promptContents: "test prompt"
+        }),
+      /cannot overlap protected project, worktree, Beads, or control-plane paths/
+    );
+  } finally {
+    __resetBubblewrapSupportForTests();
+  }
 });
 
 test("run creates an isolated worktree and executes the coder there", { timeout: 10000 }, async () => {
@@ -297,6 +419,7 @@ test("run strips BEADS_DIR from providers and blocks absolute command and write 
   assert.match(result.reason, /no provider could complete implementation/);
   const providerStore = JSON.parse(await readFile(providerStorePath, "utf8"));
   assert.equal(providerStore.calls[0].env.BEADS_DIR, null);
+  assert.equal(providerStore.calls[0].env.AGENT_RELAY_BD_BIN, null);
   assert.equal(providerStore.calls[0].absoluteWrite.ok, false);
   assert.match(providerStore.calls[0].absoluteWrite.message, /blocked write outside writable root/);
   assert.equal(providerStore.calls[0].absoluteCommand.code, 1);
@@ -688,7 +811,11 @@ test("delivery binds the reviewed artifact to the staged index even if the workt
   const gitStore = JSON.parse(await readFile(gitStorePath, "utf8"));
   const stagedPaths = gitStore.records.staged.at(-1).paths;
   assert.deepEqual(stagedPaths, ["src/staged.ts"]);
-  assert.equal(gitStore.worktrees[reviewResult.state.worktreePath].index["src/staged.ts"], "export const staged = 1;\n");
+  assert.equal(
+    Buffer.from(gitStore.worktrees[reviewResult.state.worktreePath].index["src/staged.ts"].contentBase64, "base64").toString("utf8"),
+    "export const staged = 1;\n"
+  );
+  assert.equal(gitStore.worktrees[reviewResult.state.worktreePath].index["src/staged.ts"].mode, "100644");
   assert.equal(await readFile(path.join(reviewResult.state.worktreePath, "src", "staged.ts"), "utf8"), "export const staged = 2;\n");
 });
 
@@ -902,6 +1029,67 @@ test("run does not bypass plan review quorum for non-documentation work", { time
   assert.equal(result.exitClass, "provider-quorum-unavailable");
   const coderCalls = JSON.parse(await readFile(coderStore, "utf8")).calls.length;
   assert.equal(coderCalls, 0);
+});
+
+test("review vendor independence rejects same-vendor aliases as independent reviewers", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const bdStorePath = await createFakeBdStore({
+    issues: {
+      "example-app-123": {
+        id: "example-app-123",
+        title: "Vendor independence bead",
+        description: "Require distinct reviewer vendors.",
+        design: "Exclude reviewers from the coder vendor and collapse aliases.",
+        acceptance_criteria: "Same-vendor aliases do not count toward review quorum.",
+        riskClass: "documentation",
+        dependencies: [],
+        claimed: false,
+        claimConflict: false
+      }
+    }
+  });
+  const gitStorePath = await createFakeGitStore(projectRoot);
+  const gateStorePath = await createFakeGateStore([{ ok: true }]);
+  const shimDir = await createGateShimPath();
+  const coderStore = await createFakeProviderStore([
+    {
+      type: "success",
+      writes: [{ path: "src/vendor-independence.ts", content: "export const vendorIndependence = true;\n" }],
+      report: {
+        status: "success",
+        summary: "implemented change",
+        ownedPaths: ["."],
+        commandsAttempted: ["node implement.js"],
+        changedPaths: ["src/vendor-independence.ts"],
+        artifacts: []
+      }
+    }
+  ]);
+  const reviewerStore = await createFakeProviderStore([successReviewStep()]);
+  const config = baseConfig(projectRoot, gitStorePath, {
+    providers: {
+      claude: fakeProviderConfig({ storePath: coderStore, shimDir, vendor: "OpenAI" }),
+      codex: fakeProviderConfig({ storePath: reviewerStore, shimDir, vendor: "openai" }),
+      agy: null
+    },
+    reviewProviders: ["codex"]
+  });
+  await seedRelayConfig(projectRoot, config);
+  const runResult = await run({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(runResult.ok, true);
+  const reviewResult = await review({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath, gateStorePath, gitStorePath, extra: { PATH: `${shimDir}:${process.env.PATH}` } })
+  });
+  assert.equal(reviewResult.exitClass, "provider-quorum-unavailable");
+  assert.match(reviewResult.reason, /need 1 distinct review vendors, found 0/);
 });
 
 test("high-risk plans require matching approval comments and resume advances on the correct specHash", { timeout: 10000 }, async () => {

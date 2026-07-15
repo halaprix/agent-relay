@@ -73,7 +73,7 @@ All commands return structured JSON and one of these stable exit classes:
 
 ## Beads ownership and recovery
 
-- The neutral supervisor is the only Beads writer. Workers receive `BEADS_DIR` plus readonly guidance and must not write Beads.
+- The neutral supervisor is the only Beads writer. In production Bubblewrap runs, workers receive `BEADS_DIR` mounted read-only plus a read-only `bd` executable for `bd --readonly ...`; the test-only fallback withholds the host Beads store because it lacks OS isolation.
 - Every run verifies `BEADS_DIR`, parses `bd where`, primes memories, falls back to `bd memories --json` when needed, checks the required live-store key, validates dependencies, and atomically claims the requested Bead once.
 - Structured checkpoints are appended with `bd comments add`; resume can rebuild state from Bead comments if the local ledger is gone.
 - `.agents/agent-relay/state/*.jsonl` is only a reconstructible operational ledger. If it disappears, a run is still recoverable from Beads plus Git and worktree state.
@@ -91,6 +91,8 @@ All commands return structured JSON and one of these stable exit classes:
 ## Safety model
 
 - Workers run inside isolated worktrees, never the main checkout.
+- Provider auth remains environment-driven. Pass API keys or session tokens through provider `env`; Agent Relay does not mint credentials or write them into artifacts.
+- Provider-specific wrapper packages or support files must be declared in `runtime.readOnlyMounts`. Those mounts are read-only, `HOME` is a writable synthetic sandbox directory, and overlap with the project root, worktree, Beads store, or protected control-plane paths is rejected.
 - The supervisor validates main-checkout stability around external runs, rejects blanket staging, force-push, remote mutation, protected-path drift, Beads writes, and attribution/privacy findings.
 - Review uses at least two distinct vendors for non-documentation work when quorum is available.
 - When delivery is configured, automation stops at a review-clean PR. Otherwise review pauses with `human-action-required` and an exact delivery-configuration reason. Human merge remains mandatory.

@@ -1,8 +1,10 @@
 import path from "node:path";
-import { cp, readFile, writeFile } from "node:fs/promises";
-import { runProviderCommand } from "./provider.mjs";
+import os from "node:os";
+import { spawn } from "node:child_process";
+import { cp, lstat, mkdtemp, readFile, readlink, writeFile } from "node:fs/promises";
 import { ensureDir, listFilesRecursive, pathExists, toPosixRelative } from "./fs.mjs";
-import { sha256Text } from "./hash.mjs";
+import { sha256Bytes, sha256Text } from "./hash.mjs";
+import { runProviderCommand } from "./provider.mjs";
 
 function gitCommand(config) {
   return config.git?.command || "git";
@@ -10,6 +12,214 @@ function gitCommand(config) {
 
 function gitEnv(config) {
   return config.git?.env || {};
+}
+
+function resolveSpawn(command, args) {
+  if (command.endsWith(".mjs") || command.endsWith(".js")) {
+    return {
+      command: process.execPath,
+      args: [command, ...args]
+    };
+  }
+  return { command, args };
+}
+
+function gitModeFromFsStats(stats) {
+  if (stats.isSymbolicLink()) {
+    return "120000";
+  }
+  if (stats.isFile()) {
+    return (stats.mode & 0o111) !== 0 ? "100755" : "100644";
+  }
+  throw new Error("scope-locked artifacts only support files and symlinks");
+}
+
+function buildDeletedRecord(relativePath) {
+  return {
+    path: relativePath,
+    status: "deleted",
+    type: "deleted",
+    mode: null,
+    sizeBytes: 0,
+    bytesSha256: null,
+    bytesBase64: null,
+    symlinkTarget: null
+  };
+}
+
+function buildPresentRecord({ relativePath, type, mode, bytes, symlinkTarget = null }) {
+  return {
+    path: relativePath,
+    status: "present",
+    type,
+    mode,
+    sizeBytes: bytes.length,
+    bytesSha256: sha256Bytes(bytes),
+    bytesBase64: bytes.toString("base64"),
+    symlinkTarget
+  };
+}
+
+function recordFingerprint(record) {
+  return sha256Text(JSON.stringify(record));
+}
+
+function sortRecords(records) {
+  return [...records].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function recordWorktreePath(rootDir, relativePath) {
+  const absolutePath = path.join(rootDir, relativePath);
+  if (!(await pathExists(absolutePath))) {
+    return buildDeletedRecord(relativePath);
+  }
+  const stats = await lstat(absolutePath);
+  const mode = gitModeFromFsStats(stats);
+  if (stats.isSymbolicLink()) {
+    const symlinkTarget = await readlink(absolutePath);
+    const bytes = Buffer.from(symlinkTarget, "utf8");
+    return buildPresentRecord({
+      relativePath,
+      type: "symlink",
+      mode,
+      bytes,
+      symlinkTarget
+    });
+  }
+  if (!stats.isFile()) {
+    throw new Error(`unsupported worktree entry type for ${relativePath}`);
+  }
+  const bytes = await readFile(absolutePath);
+  return buildPresentRecord({
+    relativePath,
+    type: "file",
+    mode,
+    bytes
+  });
+}
+
+async function runGitBuffer(config, cwd, args, { timeoutMs = 30000 } = {}) {
+  const spawnSpec = resolveSpawn(gitCommand(config), args);
+  const captureDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-capture-"));
+  const stdoutPath = path.join(captureDir, "stdout.bin");
+  const stderrPath = path.join(captureDir, "stderr.log");
+  return new Promise((resolve) => {
+    let settled = false;
+    const child = spawn(spawnSpec.command, spawnSpec.args, {
+      cwd,
+      env: {
+        ...process.env,
+        ...gitEnv(config),
+        AGENT_RELAY_STDOUT_FILE: stdoutPath,
+        AGENT_RELAY_STDERR_FILE: stderrPath
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const resolveRun = (payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve(payload);
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdoutChunks.push(Buffer.from(chunk));
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrChunks.push(Buffer.from(chunk));
+    });
+    child.on("error", (error) => {
+      resolveRun({
+        code: 1,
+        stdout: Buffer.concat(stdoutChunks),
+        stderr: `${Buffer.concat(stderrChunks).toString("utf8")}${stderrChunks.length > 0 ? "\n" : ""}${error.message}`
+      });
+    });
+    child.on("close", (code) => {
+      Promise.all([
+        stdoutChunks.length > 0 ? Promise.resolve(Buffer.concat(stdoutChunks)) : readFile(stdoutPath).catch(() => Buffer.alloc(0)),
+        stderrChunks.length > 0 ? Promise.resolve(Buffer.concat(stderrChunks).toString("utf8")) : readFile(stderrPath, "utf8").catch(() => "")
+      ]).then(([capturedStdout, capturedStderr]) =>
+        resolveRun({
+          code: code ?? 1,
+          stdout: capturedStdout,
+          stderr: capturedStderr
+        })
+      );
+    });
+  });
+}
+
+async function getIndexEntries(config, worktreePath, changedPaths) {
+  const run = await runGitBuffer(config, worktreePath, ["ls-files", "--stage", "-z", "--", ...changedPaths]);
+  if (run.code !== 0) {
+    throw new Error(`git ls-files failed: ${run.stderr}`);
+  }
+  const entries = new Map();
+  for (const rawEntry of run.stdout.toString("utf8").split("\0")) {
+    if (!rawEntry) {
+      continue;
+    }
+    const tabIndex = rawEntry.indexOf("\t");
+    if (tabIndex === -1) {
+      throw new Error(`unexpected ls-files entry: ${rawEntry}`);
+    }
+    const metadata = rawEntry.slice(0, tabIndex).split(" ");
+    if (metadata.length !== 3) {
+      throw new Error(`unexpected ls-files metadata: ${rawEntry}`);
+    }
+    const [mode, objectId, stage] = metadata;
+    if (stage !== "0") {
+      throw new Error(`unsupported staged conflict entry for ${rawEntry.slice(tabIndex + 1)}`);
+    }
+    entries.set(rawEntry.slice(tabIndex + 1), { mode, objectId });
+  }
+  return entries;
+}
+
+async function getGitBlob(config, worktreePath, objectId) {
+  const run = await runGitBuffer(config, worktreePath, ["cat-file", "-p", objectId]);
+  if (run.code !== 0) {
+    throw new Error(`git cat-file failed for ${objectId}: ${run.stderr}`);
+  }
+  return run.stdout;
+}
+
+async function recordIndexPath(config, worktreePath, relativePath, indexEntry) {
+  if (!indexEntry) {
+    return buildDeletedRecord(relativePath);
+  }
+  const bytes = await getGitBlob(config, worktreePath, indexEntry.objectId);
+  if (indexEntry.mode === "120000") {
+    const symlinkTarget = bytes.toString("utf8");
+    return buildPresentRecord({
+      relativePath,
+      type: "symlink",
+      mode: indexEntry.mode,
+      bytes,
+      symlinkTarget
+    });
+  }
+  return buildPresentRecord({
+    relativePath,
+    type: "file",
+    mode: indexEntry.mode,
+    bytes
+  });
+}
+
+async function writeCanonicalArtifact(filePath, records) {
+  const artifact = {
+    format: "agent-relay-diff/v1",
+    records: sortRecords(records)
+  };
+  await writeFile(filePath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
 }
 
 export async function runGit(config, cwd, args, { timeoutMs = 30000 } = {}) {
@@ -94,8 +304,7 @@ export async function captureSnapshot(rootDir, { ignorePrefixes = [] } = {}) {
     if (ignorePrefixes.some((prefix) => relativePath === prefix || relativePath.startsWith(`${prefix}/`))) {
       continue;
     }
-    const content = await readFile(filePath, "utf8").catch(() => "");
-    snapshot[relativePath] = sha256Text(content);
+    snapshot[relativePath] = recordFingerprint(await recordWorktreePath(rootDir, relativePath));
   }
   return snapshot;
 }
@@ -112,28 +321,21 @@ export async function writeSnapshotArtifact(filePath, snapshot) {
 export async function buildScopeLockedDiffArtifact({ worktreePath, beforeSnapshot, filePath }) {
   const afterSnapshot = await captureSnapshot(worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
   const changedPaths = diffSnapshots(beforeSnapshot, afterSnapshot);
-  const sections = [];
+  const records = [];
   for (const relativePath of changedPaths) {
-    const absolutePath = path.join(worktreePath, relativePath);
-    const content = await readFile(absolutePath, "utf8").catch(() => "<deleted or unreadable>");
-    sections.push(`### ${relativePath}\n${content}`);
+    records.push(await recordWorktreePath(worktreePath, relativePath));
   }
-  await writeFile(
-    filePath,
-    `# Scope-Locked Diff\n\n${sections.join("\n\n")}\n`,
-    "utf8"
-  );
+  await writeCanonicalArtifact(filePath, records);
   return { changedPaths, afterSnapshot };
 }
 
 export async function buildStagedDiffArtifact({ config, worktreePath, changedPaths, filePath }) {
-  const sections = [];
-  for (const relativePath of changedPaths) {
-    const run = await runGit(config, worktreePath, ["show", `:${relativePath}`], { timeoutMs: 30000 });
-    const content = run.code === 0 ? run.stdout : "<deleted or unreadable>";
-    sections.push(`### ${relativePath}\n${content}`);
+  const indexEntries = await getIndexEntries(config, worktreePath, changedPaths);
+  const records = [];
+  for (const relativePath of [...changedPaths].sort()) {
+    records.push(await recordIndexPath(config, worktreePath, relativePath, indexEntries.get(relativePath)));
   }
-  await writeFile(filePath, `# Scope-Locked Diff\n\n${sections.join("\n\n")}\n`, "utf8");
+  await writeCanonicalArtifact(filePath, records);
   return filePath;
 }
 

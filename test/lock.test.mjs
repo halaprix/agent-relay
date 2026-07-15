@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { acquireLock } from "../src/lib/lock.mjs";
 
 test("acquireLock rejects a fresh lock and recovers a stale lock", { timeout: 10000 }, async () => {
@@ -33,6 +33,8 @@ test("acquireLock rejects a fresh lock and recovers a stale lock", { timeout: 10
     pid: 999999,
     heartbeatAt: Date.now() - 10000
   }, null, 2)}\n`, "utf8");
+  const staleAt = new Date(Date.now() - 10000);
+  await utimes(lockPath, staleAt, staleAt);
   const recovered = await acquireLock({
     lockPath,
     owner: "run:4",
@@ -56,6 +58,8 @@ test("acquireLock keeps live stale owners, allows one dead-owner takeover, and s
     pid: process.pid,
     heartbeatAt: Date.now() - 10000
   }, null, 2)}\n`, "utf8");
+  const liveStaleAt = new Date(Date.now() - 10000);
+  await utimes(lockPath, liveStaleAt, liveStaleAt);
   const blocked = await acquireLock({
     lockPath,
     owner: "run:blocked",
@@ -72,13 +76,16 @@ test("acquireLock keeps live stale owners, allows one dead-owner takeover, and s
     pid: 999998,
     heartbeatAt: Date.now() - 10000
   }, null, 2)}\n`, "utf8");
+  const deadOwnerAt = new Date(Date.now() - 10000);
+  await utimes(lockPath, deadOwnerAt, deadOwnerAt);
   const [first, second] = await Promise.all([
     acquireLock({ lockPath, owner: "run:first", staleMs: 100, heartbeatMs: 25 }),
     acquireLock({ lockPath, owner: "run:second", staleMs: 100, heartbeatMs: 25 })
   ]);
   const acquired = [first, second].filter((attempt) => attempt.acquired);
   assert.equal(acquired.length, 1);
-  assert.equal([first, second].some((attempt) => attempt.recoveredStale), true);
+  const displacedLock = JSON.parse(await readFile(lockPath, "utf8"));
+  assert.notEqual(displacedLock.token, "dead-owner");
 
   const replacedToken = acquired[0].currentLock.token;
   await writeFile(lockPath, `${JSON.stringify({
@@ -94,4 +101,38 @@ test("acquireLock keeps live stale owners, allows one dead-owner takeover, and s
   assert.notEqual(finalLock.token, replacedToken);
 
   await Promise.all([first.release?.(), second.release?.()]);
+});
+
+test("acquireLock yields exactly one owner across repeated dead-owner contention rounds", { timeout: 15000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
+  const lockPath = path.join(root, "locks", "bead.lock.json");
+  await mkdir(path.dirname(lockPath), { recursive: true });
+
+  for (let round = 0; round < 24; round += 1) {
+    await writeFile(lockPath, `${JSON.stringify({
+      token: `dead-${round}`,
+      owner: `run:dead:${round}`,
+      host: os.hostname(),
+      pid: 900000 + round,
+      heartbeatAt: Date.now() - 10000
+    }, null, 2)}\n`, "utf8");
+    const staleRoundAt = new Date(Date.now() - 10000);
+    await utimes(lockPath, staleRoundAt, staleRoundAt);
+
+    const attempts = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        acquireLock({
+          lockPath,
+          owner: `run:${round}:${index}`,
+          staleMs: 100,
+          heartbeatMs: 15
+        })
+      )
+    );
+    const acquired = attempts.filter((attempt) => attempt.acquired);
+    assert.equal(acquired.length, 1);
+    const diskLock = JSON.parse(await readFile(lockPath, "utf8"));
+    assert.equal(diskLock.token, acquired[0].currentLock.token);
+    await Promise.all(attempts.map((attempt) => attempt.release?.()));
+  }
 });
