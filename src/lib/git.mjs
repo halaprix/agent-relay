@@ -70,10 +70,15 @@ function sortRecords(records) {
 
 async function recordWorktreePath(rootDir, relativePath) {
   const absolutePath = path.join(rootDir, relativePath);
-  if (!(await pathExists(absolutePath))) {
-    return buildDeletedRecord(relativePath);
+  let stats;
+  try {
+    stats = await lstat(absolutePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return buildDeletedRecord(relativePath);
+    }
+    throw error;
   }
-  const stats = await lstat(absolutePath);
   const mode = gitModeFromFsStats(stats);
   if (stats.isSymbolicLink()) {
     const symlinkTarget = await readlink(absolutePath);

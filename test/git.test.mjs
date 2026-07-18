@@ -101,3 +101,47 @@ test("canonical diff artifacts preserve exact bytes, deletions, executable mode,
   const driftedBinary = drifted.records.find((record) => record.path === "src/binary.bin");
   assert.equal(driftedBinary.bytesBase64, Buffer.from([0x81]).toString("base64"));
 });
+
+test("broken symlinks remain symlinks in reviewed and staged artifacts", { timeout: 15000 }, async () => {
+  const projectRoot = await createRealGitProjectFixture();
+  const gitConfig = {
+    git: {
+      command: "git",
+      env: {},
+      statusArgs: ["status", "--short"]
+    }
+  };
+
+  await mkdir(path.join(projectRoot, "src"), { recursive: true });
+  await writeFile(path.join(projectRoot, "src", "base.txt"), "base\n", "utf8");
+  await runGitCommand(projectRoot, ["add", "."]);
+  await runGitCommand(projectRoot, ["commit", "-m", "fixture"]);
+
+  const beforeSnapshot = await captureSnapshot(projectRoot, { ignorePrefixes: [".git"] });
+  await symlink("missing-target.txt", path.join(projectRoot, "src", "broken-link"));
+
+  const worktreeArtifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-broken-link-")), "worktree.json");
+  const { changedPaths } = await buildScopeLockedDiffArtifact({
+    worktreePath: projectRoot,
+    beforeSnapshot,
+    filePath: worktreeArtifactPath
+  });
+  assert.deepEqual(changedPaths, ["src/broken-link"]);
+
+  await stageExplicitPaths(gitConfig, projectRoot, changedPaths);
+  const stagedArtifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-broken-stage-")), "staged.json");
+  await buildStagedDiffArtifact({
+    config: gitConfig,
+    worktreePath: projectRoot,
+    changedPaths,
+    filePath: stagedArtifactPath
+  });
+
+  const reviewedArtifact = await readFile(worktreeArtifactPath, "utf8");
+  const stagedArtifact = await readFile(stagedArtifactPath, "utf8");
+  assert.equal(stagedArtifact, reviewedArtifact);
+  const record = JSON.parse(reviewedArtifact).records[0];
+  assert.equal(record.type, "symlink");
+  assert.equal(record.mode, "120000");
+  assert.equal(record.symlinkTarget, "missing-target.txt");
+});

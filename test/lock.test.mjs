@@ -2,137 +2,142 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { acquireLock } from "../src/lib/lock.mjs";
 
-test("acquireLock rejects a fresh lock and recovers a stale lock", { timeout: 10000 }, async () => {
+const lockModuleUrl = new URL("../src/lib/lock.mjs", import.meta.url).href;
+const contenderScript = `
+import { access } from "node:fs/promises";
+import { acquireLock } from ${JSON.stringify(lockModuleUrl)};
+async function waitForSignal(signalPath) {
+  for (;;) {
+    try {
+      await access(signalPath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+const lockPath = process.argv[1];
+const owner = process.argv[2];
+const startSignalPath = process.argv[3];
+const releaseSignalPath = process.argv[4];
+await waitForSignal(startSignalPath);
+const lock = await acquireLock({ lockPath, owner });
+process.send?.({ acquired: lock.acquired, currentLock: lock.currentLock ?? null, reason: lock.reason ?? null });
+if (!lock.acquired) {
+  process.exit(0);
+}
+await waitForSignal(releaseSignalPath);
+await lock.release();
+process.exit(0);
+`;
+
+async function waitForContenderResult(child) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      child.removeAllListeners("message");
+      child.removeAllListeners("error");
+      child.removeAllListeners("exit");
+    };
+    const finish = (callback) => (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    child.on("message", finish(resolve));
+    child.on("error", finish(reject));
+    child.on("exit", (code, signal) => {
+      finish(reject)(new Error(`lock contender exited before reporting: code=${code ?? "null"} signal=${signal ?? "null"}`));
+    });
+  });
+}
+
+async function spawnContender(lockPath, owner, startSignalPath, releaseSignalPath) {
+  const child = spawn(process.execPath, ["--input-type=module", "-e", contenderScript, lockPath, owner, startSignalPath, releaseSignalPath], {
+    stdio: ["pipe", "ignore", "ignore", "ipc"]
+  });
+  const result = await waitForContenderResult(child);
+  return { child, result };
+}
+
+async function waitForExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  await new Promise((resolve) => child.once("exit", resolve));
+}
+
+test("acquireLock blocks a second holder while the first kernel flock is active", { timeout: 10000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
   const lockPath = path.join(root, "locks", "bead.lock.json");
   await mkdir(path.dirname(lockPath), { recursive: true });
 
-  await writeFile(lockPath, `${JSON.stringify({
-    token: "fresh",
-    owner: "run:1",
-    host: os.hostname(),
-    pid: 1,
-    heartbeatAt: Date.now()
-  }, null, 2)}\n`, "utf8");
+  const first = await acquireLock({
+    lockPath,
+    owner: "run:1"
+  });
+  assert.equal(first.acquired, true);
+
   const blocked = await acquireLock({
     lockPath,
-    owner: "run:2",
-    staleMs: 5000,
-    heartbeatMs: 50
+    owner: "run:2"
   });
   assert.equal(blocked.acquired, false);
+  assert.equal(blocked.reason, "locked");
   assert.equal(blocked.currentLock.owner, "run:1");
 
-  await writeFile(lockPath, `${JSON.stringify({
-    token: "stale",
-    owner: "run:3",
-    host: os.hostname(),
-    pid: 999999,
-    heartbeatAt: Date.now() - 10000
-  }, null, 2)}\n`, "utf8");
-  const staleAt = new Date(Date.now() - 10000);
-  await utimes(lockPath, staleAt, staleAt);
-  const recovered = await acquireLock({
-    lockPath,
-    owner: "run:4",
-    staleMs: 100,
-    heartbeatMs: 50
-  });
-  assert.equal(recovered.acquired, true);
-  assert.equal(recovered.recoveredStale, true);
-  await recovered.release();
+  await first.release();
 });
 
-test("acquireLock keeps live stale owners, allows one dead-owner takeover, and stops stale heartbeats from overwriting replacements", { timeout: 10000 }, async () => {
+test("kernel flock yields exactly one multi-process owner across 24 contenders", { timeout: 15000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
   const lockPath = path.join(root, "locks", "bead.lock.json");
+  const startSignalPath = path.join(root, "start.signal");
+  const releaseSignalPath = path.join(root, "release.signal");
   await mkdir(path.dirname(lockPath), { recursive: true });
 
-  await writeFile(lockPath, `${JSON.stringify({
-    token: "live-stale",
-    owner: "run:live",
-    host: os.hostname(),
-    pid: process.pid,
-    heartbeatAt: Date.now() - 10000
-  }, null, 2)}\n`, "utf8");
-  const liveStaleAt = new Date(Date.now() - 10000);
-  await utimes(lockPath, liveStaleAt, liveStaleAt);
-  const blocked = await acquireLock({
-    lockPath,
-    owner: "run:blocked",
-    staleMs: 100,
-    heartbeatMs: 50
-  });
-  assert.equal(blocked.acquired, false);
-  assert.equal(blocked.reason, "owner-alive");
-
-  await writeFile(lockPath, `${JSON.stringify({
-    token: "dead-owner",
-    owner: "run:dead",
-    host: os.hostname(),
-    pid: 999998,
-    heartbeatAt: Date.now() - 10000
-  }, null, 2)}\n`, "utf8");
-  const deadOwnerAt = new Date(Date.now() - 10000);
-  await utimes(lockPath, deadOwnerAt, deadOwnerAt);
-  const [first, second] = await Promise.all([
-    acquireLock({ lockPath, owner: "run:first", staleMs: 100, heartbeatMs: 25 }),
-    acquireLock({ lockPath, owner: "run:second", staleMs: 100, heartbeatMs: 25 })
-  ]);
-  const acquired = [first, second].filter((attempt) => attempt.acquired);
+  const contendersPromise = Promise.all(
+    Array.from({ length: 24 }, (_, index) => spawnContender(lockPath, `run:${index}`, startSignalPath, releaseSignalPath))
+  );
+  await writeFile(startSignalPath, "go\n", "utf8");
+  const contenders = await contendersPromise;
+  const acquired = contenders.filter((contender) => contender.result.acquired);
   assert.equal(acquired.length, 1);
-  const displacedLock = JSON.parse(await readFile(lockPath, "utf8"));
-  assert.notEqual(displacedLock.token, "dead-owner");
-
-  const replacedToken = acquired[0].currentLock.token;
-  await writeFile(lockPath, `${JSON.stringify({
-    token: "replacement",
-    owner: "run:replacement",
-    host: os.hostname(),
-    pid: 999997,
-    heartbeatAt: Date.now()
-  }, null, 2)}\n`, "utf8");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const finalLock = JSON.parse(await readFile(lockPath, "utf8"));
-  assert.equal(finalLock.token, "replacement");
-  assert.notEqual(finalLock.token, replacedToken);
-
-  await Promise.all([first.release?.(), second.release?.()]);
+  const diskLock = JSON.parse(await readFile(lockPath, "utf8"));
+  assert.equal(diskLock.owner, acquired[0].result.currentLock.owner);
+  await writeFile(releaseSignalPath, "release\n", "utf8");
+  for (const contender of contenders) {
+    await waitForExit(contender.child);
+  }
 });
 
-test("acquireLock yields exactly one owner across repeated dead-owner contention rounds", { timeout: 15000 }, async () => {
+test("kernel flock releases on holder crash and allows reacquire", { timeout: 15000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
   const lockPath = path.join(root, "locks", "bead.lock.json");
+  const startSignalPath = path.join(root, "start.signal");
+  const releaseSignalPath = path.join(root, "release.signal");
   await mkdir(path.dirname(lockPath), { recursive: true });
+  await access(path.dirname(lockPath));
+  await writeFile(startSignalPath, "go\n", "utf8");
 
-  for (let round = 0; round < 24; round += 1) {
-    await writeFile(lockPath, `${JSON.stringify({
-      token: `dead-${round}`,
-      owner: `run:dead:${round}`,
-      host: os.hostname(),
-      pid: 900000 + round,
-      heartbeatAt: Date.now() - 10000
-    }, null, 2)}\n`, "utf8");
-    const staleRoundAt = new Date(Date.now() - 10000);
-    await utimes(lockPath, staleRoundAt, staleRoundAt);
+  const first = await spawnContender(lockPath, "run:first", startSignalPath, releaseSignalPath);
+  assert.equal(first.result.acquired, true);
+  first.child.kill("SIGKILL");
+  await new Promise((resolve) => first.child.once("exit", resolve));
 
-    const attempts = await Promise.all(
-      Array.from({ length: 8 }, (_, index) =>
-        acquireLock({
-          lockPath,
-          owner: `run:${round}:${index}`,
-          staleMs: 100,
-          heartbeatMs: 15
-        })
-      )
-    );
-    const acquired = attempts.filter((attempt) => attempt.acquired);
-    assert.equal(acquired.length, 1);
-    const diskLock = JSON.parse(await readFile(lockPath, "utf8"));
-    assert.equal(diskLock.token, acquired[0].currentLock.token);
-    await Promise.all(attempts.map((attempt) => attempt.release?.()));
-  }
+  const second = await acquireLock({
+    lockPath,
+    owner: "run:second"
+  });
+  assert.equal(second.acquired, true);
+  const diskLock = JSON.parse(await readFile(lockPath, "utf8"));
+  assert.equal(diskLock.owner, "run:second");
+  await second.release();
 });

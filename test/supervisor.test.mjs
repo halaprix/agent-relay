@@ -6,6 +6,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadAdapter } from "../src/lib/adapter.mjs";
+import { acquireLock } from "../src/lib/lock.mjs";
 import { projectStateRoot, repoPath, runStatePath } from "../src/lib/paths.mjs";
 import { pathExists, removePath } from "../src/lib/fs.mjs";
 import {
@@ -193,6 +194,8 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
   const { adapter } = await loadAdapter("example-app");
   const config = baseConfig(projectRoot, gitStorePath);
   const supervisorEnv = relayEnv({ bdStorePath, gitStorePath });
+  const reviewArtifactSource = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-review-artifact-")), "reviewed.json");
+  await writeFile(reviewArtifactSource, '{"artifact":true}\n', "utf8");
 
   await assert.rejects(
     () =>
@@ -239,7 +242,13 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       providerName: "claude",
       cwd: projectRoot,
       writableRoot: projectRoot,
-      promptContents: "test prompt"
+      copiedArtifacts: [
+        {
+          sourcePath: reviewArtifactSource,
+          fileName: "review-artifact.json"
+        }
+      ],
+      promptBuilder: (bundle) => `Prompt path: ${bundle.promptPath}\nArtifact path: ${bundle.files.get("review-artifact.json")}`
     });
 
     assert.equal(isolated.command, "/usr/bin/bwrap");
@@ -256,6 +265,15 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
     const bdMountIndex = indexOfMount(isolated.args, repoPath("test", "fixtures", "fake-bd.mjs"));
     assert.notEqual(bdMountIndex, -1);
     assert.equal(isolated.args[bdMountIndex], "--ro-bind");
+    assert.equal(isolated.args.at(-1), isolated.promptPath);
+    assert.match(await readFile(isolated.promptPath, "utf8"), /Artifact path: /);
+    const promptContents = await readFile(isolated.promptPath, "utf8");
+    const artifactPath = promptContents.match(/Artifact path: (.+)\n?$/m)?.[1];
+    assert.equal(typeof artifactPath, "string");
+    assert.equal(await pathExists(artifactPath), true);
+    assert.equal(await pathExists(path.join(isolated.bundleRoot, "review-artifact.json")), true);
+    assert.equal(isolated.args[isolated.args.indexOf("--chdir") + 1], projectRoot);
+    assert.notEqual(indexOfMount(isolated.args, projectRoot), -1);
 
     const blockedGitTarget = repoPath("test", "fixtures", "fake-git-driver.mjs");
     const blockedGitMountIndex = indexOfMount(isolated.args, blockedGitTarget);
@@ -283,6 +301,67 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
           providerName: "claude",
           cwd: projectRoot,
           writableRoot: projectRoot,
+          promptContents: "test prompt"
+        }),
+      /cannot overlap protected project, worktree, Beads, or control-plane paths/
+    );
+
+    await assert.rejects(
+      () =>
+        __prepareIsolatedProviderRunForTests({
+          projectRoot,
+          adapter,
+          config,
+          supervisorEnv,
+          providerConfig: {
+            ...fakeProviderConfig({
+              storePath: providerStorePath,
+              shimDir,
+              vendor: "anthropic"
+            }),
+            runtime: {
+              readOnlyMounts: [path.dirname(projectRoot)]
+            }
+          },
+          beadId: "example-app-123",
+          providerName: "claude",
+          cwd: projectRoot,
+          writableRoot: projectRoot,
+          promptContents: "test prompt"
+        }),
+      /cannot overlap protected project, worktree, Beads, or control-plane paths/
+    );
+
+    const externalGitRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-external-git-"));
+    const externalGitDir = path.join(externalGitRoot, "worktrees", "wt");
+    const externalCommonDir = path.join(externalGitRoot, "common");
+    const externalWorktreeRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-external-worktree-"));
+    await mkdir(externalGitDir, { recursive: true });
+    await mkdir(externalCommonDir, { recursive: true });
+    await writeFile(path.join(externalGitDir, "commondir"), "../../common\n", "utf8");
+    await rm(path.join(externalWorktreeRoot, ".git"), { recursive: true, force: true });
+    await writeFile(path.join(externalWorktreeRoot, ".git"), `gitdir: ${externalGitDir}\n`, "utf8");
+    await assert.rejects(
+      () =>
+        __prepareIsolatedProviderRunForTests({
+          projectRoot,
+          adapter,
+          config,
+          supervisorEnv,
+          providerConfig: {
+            ...fakeProviderConfig({
+              storePath: providerStorePath,
+              shimDir,
+              vendor: "anthropic"
+            }),
+            runtime: {
+              readOnlyMounts: [externalGitRoot]
+            }
+          },
+          beadId: "example-app-123",
+          providerName: "claude",
+          cwd: externalWorktreeRoot,
+          writableRoot: externalWorktreeRoot,
           promptContents: "test prompt"
         }),
       /cannot overlap protected project, worktree, Beads, or control-plane paths/
@@ -1370,28 +1449,31 @@ test("run and resume reject a fresh concurrent bead lock", { timeout: 10000 }, a
   const projectRoot = await createProjectFixture();
   const lockDir = path.join(projectStateRoot(projectRoot), "locks");
   await mkdir(lockDir, { recursive: true });
-  await writeFile(path.join(lockDir, "example-app-123.lock.json"), `${JSON.stringify({
-    token: "lock-token",
-    owner: "run:999",
-    pid: 999,
-    heartbeatAt: Date.now()
-  }, null, 2)}\n`, "utf8");
-
-  const runResult = await run({
-    projectRoot,
-    adapterName: "example-app",
-    beadId: "example-app-123"
+  const lock = await acquireLock({
+    lockPath: path.join(lockDir, "example-app-123.lock.json"),
+    owner: "run:999"
   });
-  assert.equal(runResult.exitClass, "human-action-required");
-  assert.match(runResult.reason, /locked by another run/);
+  assert.equal(lock.acquired, true);
 
-  const resumeResult = await resume({
-    projectRoot,
-    adapterName: "example-app",
-    beadId: "example-app-123"
-  });
-  assert.equal(resumeResult.exitClass, "human-action-required");
-  assert.match(resumeResult.reason, /locked by another run/);
+  try {
+    const runResult = await run({
+      projectRoot,
+      adapterName: "example-app",
+      beadId: "example-app-123"
+    });
+    assert.equal(runResult.exitClass, "human-action-required");
+    assert.match(runResult.reason, /locked by another run/);
+
+    const resumeResult = await resume({
+      projectRoot,
+      adapterName: "example-app",
+      beadId: "example-app-123"
+    });
+    assert.equal(resumeResult.exitClass, "human-action-required");
+    assert.match(resumeResult.reason, /locked by another run/);
+  } finally {
+    await lock.release();
+  }
 });
 
 test("review fails closed when a reviewer mutates a real git worktree", { timeout: 15000 }, async () => {

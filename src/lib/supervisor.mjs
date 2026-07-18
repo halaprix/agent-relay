@@ -1,5 +1,5 @@
 import path from "node:path";
-import { copyFile, readdir, readFile, realpath, writeFile, mkdtemp, rename } from "node:fs/promises";
+import { copyFile, lstat, readdir, readFile, realpath, writeFile, mkdtemp, rename } from "node:fs/promises";
 import os from "node:os";
 import { loadAdapter, syncAdapters } from "./adapter.mjs";
 import { appendBeadComment, approvalForSpecHash, rebuildStateFromBeadComments, verifyBeadsStore } from "./beads.mjs";
@@ -423,6 +423,39 @@ async function resolvePathForMount(targetPath) {
   return realpath(targetPath);
 }
 
+async function resolveGitProtectionRoots(repoRoot) {
+  const roots = new Set();
+  if (!repoRoot) {
+    return roots;
+  }
+  const gitEntryPath = path.join(repoRoot, ".git");
+  if (!(await pathExists(gitEntryPath))) {
+    return roots;
+  }
+  const gitStats = await lstat(gitEntryPath);
+  if (gitStats.isDirectory()) {
+    roots.add(await realpath(gitEntryPath));
+    return roots;
+  }
+  const gitFile = await readFile(gitEntryPath, "utf8");
+  const match = gitFile.match(/^gitdir:\s*(.+)\s*$/m);
+  if (!match) {
+    return roots;
+  }
+  const gitDir = path.resolve(repoRoot, match[1].trim());
+  if (await pathExists(gitDir)) {
+    roots.add(await realpath(gitDir));
+    const commonDirPath = path.join(gitDir, "commondir");
+    if (await pathExists(commonDirPath)) {
+      const commonDir = path.resolve(gitDir, (await readFile(commonDirPath, "utf8")).trim());
+      if (await pathExists(commonDir)) {
+        roots.add(await realpath(commonDir));
+      }
+    }
+  }
+  return roots;
+}
+
 function parentDirectories(targetPath) {
   const dirs = [];
   let current = path.dirname(targetPath);
@@ -440,6 +473,14 @@ function isUnderAnyRoot(targetPath, roots) {
   return roots.some((root) => targetPath === root || targetPath.startsWith(`${root}${path.sep}`));
 }
 
+function overlapsAnyProtectedRoot(targetPath, roots) {
+  return roots.some((root) =>
+    targetPath === root ||
+    targetPath.startsWith(`${root}${path.sep}`) ||
+    root.startsWith(`${targetPath}${path.sep}`)
+  );
+}
+
 async function protectedRuntimeRoots({ projectRoot, config, adapter, writableRoot }) {
   const roots = new Set();
   const candidates = [
@@ -452,6 +493,9 @@ async function protectedRuntimeRoots({ projectRoot, config, adapter, writableRoo
   for (const baseRoot of [projectRoot, config.mainCheckoutRoot || projectRoot, writableRoot]) {
     for (const protectedPath of adapter.controlPlane.protectedPaths || []) {
       candidates.push(path.join(baseRoot, protectedPath));
+    }
+    for (const gitRoot of await resolveGitProtectionRoots(baseRoot)) {
+      roots.add(gitRoot);
     }
   }
   for (const candidate of candidates) {
@@ -714,12 +758,19 @@ async function createProviderBundle({ beadId, providerName, promptContents, copi
   const promptPath = path.join(bundleRoot, "prompt.txt");
   await writeFile(promptPath, `${promptContents}\n`, "utf8");
   const copied = [];
+  const files = new Map([["prompt.txt", promptPath]]);
   for (const artifact of copiedArtifacts) {
     const destination = path.join(bundleRoot, artifact.fileName);
     await copyFile(artifact.sourcePath, destination);
     copied.push(destination);
+    files.set(artifact.fileName, destination);
   }
-  return { bundleRoot, promptPath, copiedArtifacts: copied };
+  return {
+    bundleRoot,
+    promptPath,
+    copiedArtifacts: copied,
+    files
+  };
 }
 
 async function prepareIsolatedProviderRun({
@@ -733,10 +784,15 @@ async function prepareIsolatedProviderRun({
   cwd,
   writableRoot,
   promptContents,
+  promptBuilder = null,
   copiedArtifacts = []
 }) {
   validateRuntimeProviderConfig(providerName, providerConfig);
-  const bundle = await createProviderBundle({ beadId, providerName, promptContents, copiedArtifacts });
+  const bundle = await createProviderBundle({ beadId, providerName, promptContents: "", copiedArtifacts });
+  const finalPromptContents = typeof promptBuilder === "function"
+    ? await promptBuilder(bundle)
+    : promptContents;
+  await writeFile(bundle.promptPath, `${finalPromptContents}\n`, "utf8");
   const sandboxRoot = path.join(writableRoot, ".agent-relay-sandbox", `${providerName}-${Date.now()}-${process.pid}`);
   await ensureDir(path.join(sandboxRoot, "home"));
   const { mirrored, flush } = await mirrorProviderEnvFiles(providerConfig.env || {}, sandboxRoot, providerName);
@@ -785,7 +841,7 @@ async function prepareIsolatedProviderRun({
   });
   for (const mountPath of providerConfig.runtime?.readOnlyMounts || []) {
     const resolvedMountPath = await resolvePathForMount(mountPath);
-    if (isUnderAnyRoot(resolvedMountPath, runtimeRoots)) {
+    if (overlapsAnyProtectedRoot(resolvedMountPath, runtimeRoots)) {
       throw new Error(`provider ${providerName}.runtime.readOnlyMounts cannot overlap protected project, worktree, Beads, or control-plane paths: ${mountPath}`);
     }
     mounts.set(resolvedMountPath, { source: resolvedMountPath, mode: "ro" });
@@ -846,6 +902,9 @@ async function prepareIsolatedProviderRun({
           : resolvedArgs,
       env,
       captureViaEnv: true,
+      bundleRoot: bundle.bundleRoot,
+      promptPath: bundle.promptPath,
+      copiedArtifactPaths: bundle.copiedArtifacts,
       async finalize() {
         await flush();
       }
@@ -883,6 +942,9 @@ async function prepareIsolatedProviderRun({
     args: bwrapArgs,
     cwd,
     env,
+    bundleRoot: bundle.bundleRoot,
+    promptPath: bundle.promptPath,
+    copiedArtifactPaths: bundle.copiedArtifacts,
     async finalize() {
       await flush();
     }
@@ -1276,9 +1338,7 @@ async function writeProviderPrompt({ projectRoot, beadId, fileName, contents }) 
 async function withBeadLock({ projectRoot, beadId, action }, fn) {
   const lock = await acquireLock({
     lockPath: lockPathForBead(projectRoot, beadId),
-    owner: `${action}:${process.pid}`,
-    staleMs: 30000,
-    heartbeatMs: 200
+    owner: `${action}:${process.pid}`
   });
   if (!lock.acquired) {
     return result("human-action-required", action, {
@@ -1436,6 +1496,7 @@ async function runPlanReview({ projectRoot, beadId, state, config, adapter, env 
       `Acceptance: ${state.issue.acceptance}`,
       `Dependencies: ${state.issue.dependencies.map((dependency) => `${dependency.id}:${dependency.status}`).join(", ") || "none"}`
     ].join("\n");
+    const reviewRoot = await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-${beadId}-`));
     const isolated = await prepareIsolatedProviderRun({
       projectRoot,
       adapter,
@@ -1444,23 +1505,26 @@ async function runPlanReview({ projectRoot, beadId, state, config, adapter, env 
       providerConfig,
       beadId,
       providerName,
-      cwd: await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-${beadId}-`)),
-      writableRoot: await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-writable-${beadId}-`)),
-      promptContents: "",
-      copiedArtifacts: []
+      cwd: reviewRoot,
+      writableRoot: reviewRoot,
+      copiedArtifacts: [
+        {
+          sourcePath: await writeProviderPrompt({
+            projectRoot,
+            beadId,
+            fileName: `plan-spec-${providerName}.txt`,
+            contents: specContents
+          }),
+          fileName: "spec.txt"
+        }
+      ],
+      promptBuilder: (bundle) =>
+        buildPlanReviewPrompt({
+          specArtifactPath: bundle.files.get("spec.txt"),
+          strongReview: policy.strongReviewersOnly,
+          specHash: state.specHash
+        })
     });
-    const specArtifactPath = path.join(path.dirname(isolated.env.HOME), "spec.txt");
-    await writeFile(specArtifactPath, `${specContents}\n`, "utf8");
-    const promptPath = path.join(path.dirname(isolated.env.HOME), "prompt.txt");
-    await writeFile(promptPath, `${buildPlanReviewPrompt({
-      specArtifactPath,
-      strongReview: policy.strongReviewersOnly,
-      specHash: state.specHash
-    })}\n`, "utf8");
-    const promptIndex = isolated.args.lastIndexOf(path.join(path.dirname(isolated.env.HOME), "prompt.txt"));
-    if (promptIndex !== -1) {
-      isolated.args[promptIndex] = promptPath;
-    }
     const run = await runCommandChecked({
       config,
       projectRoot,
@@ -1902,26 +1966,20 @@ async function runReviewer({ projectRoot, beadId, state, config, adapter, env })
       providerName,
       cwd: state.worktreePath,
       writableRoot: state.worktreePath,
-      promptContents: "",
       copiedArtifacts: [
         {
           sourcePath: state.latestDiffArtifact,
           fileName: "review-artifact.md"
         }
-      ]
+      ],
+      promptBuilder: (bundle) =>
+        buildReviewPrompt({
+          state,
+          artifactPath: bundle.files.get("review-artifact.md"),
+          reviewVendor: providerName,
+          strongReview: policy.strongReviewersOnly
+        })
     });
-    const reviewArtifactPath = path.join(path.dirname(isolated.env.HOME), "review-artifact.md");
-    const promptPath = path.join(path.dirname(isolated.env.HOME), "prompt.txt");
-    await writeFile(promptPath, `${buildReviewPrompt({
-      state,
-      artifactPath: reviewArtifactPath,
-      reviewVendor: providerName,
-      strongReview: policy.strongReviewersOnly
-    })}\n`, "utf8");
-    const promptIndex = isolated.args.lastIndexOf(path.join(path.dirname(isolated.env.HOME), "prompt.txt"));
-    if (promptIndex !== -1) {
-      isolated.args[promptIndex] = promptPath;
-    }
     const run = await runCommandChecked({
       config,
       projectRoot,

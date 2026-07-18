@@ -1,8 +1,14 @@
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { link, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { ensureDir, pathExists } from "./fs.mjs";
+
+const FLOCK_COMMAND = "/usr/bin/flock";
+const HOLDER_READY = "agent-relay-lock-ready";
+const HOLDER_BLOCKED_EXIT_CODE = 42;
+const HOLDER_FAILURE_EXIT_CODE = 70;
 
 async function readLockFile(lockPath) {
   if (!(await pathExists(lockPath))) {
@@ -23,178 +29,118 @@ async function readLockFile(lockPath) {
   }
 }
 
-function isHeartbeatStale(lockRecord, staleMs) {
-  if (!lockRecord?.heartbeatAt) {
-    return true;
-  }
-  return Date.now() - Number(lockRecord.heartbeatAt) > staleMs;
+async function writeLockMetadata(lockPath, lockRecord) {
+  await writeFile(lockPath, `${JSON.stringify(lockRecord, null, 2)}\n`, "utf8");
 }
 
-function isSameHost(lockRecord) {
-  return lockRecord?.host === os.hostname();
+async function waitForLockHolder(child) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const cleanup = () => {
+      child.stdout?.removeAllListeners();
+      child.stderr?.removeAllListeners();
+      child.removeAllListeners("exit");
+      child.removeAllListeners("error");
+    };
+    const finish = (callback) => (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onResolve = finish(resolve);
+    const onReject = finish(reject);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.includes(`${HOLDER_READY}\n`)) {
+        onResolve({ acquired: true, stdout, stderr });
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      onReject(error);
+    });
+    child.on("exit", (code, signal) => {
+      if (code === HOLDER_BLOCKED_EXIT_CODE) {
+        onResolve({ acquired: false, stdout, stderr, code, signal });
+        return;
+      }
+      onReject(new Error(`flock holder failed with code ${code ?? "null"} signal ${signal ?? "null"}: ${stderr || stdout}`));
+    });
+  });
 }
 
-function isProcessAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
+async function spawnLockHolder(lockPath) {
+  if (process.platform !== "linux") {
+    throw new Error("kernel-backed flock locks require Linux");
   }
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "EPERM") {
-      return true;
-    }
-    return false;
+  if (!(await pathExists(FLOCK_COMMAND))) {
+    throw new Error("kernel-backed flock command is unavailable");
   }
-}
-
-async function createLockCandidate(lockPath, lockRecord) {
-  const candidatePath = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
-  await writeFile(candidatePath, `${JSON.stringify(lockRecord, null, 2)}\n`, "utf8");
-  const handle = await open(candidatePath, "r+");
-  return { candidatePath, handle };
-}
-
-async function publishCandidate(lockPath, candidatePath) {
-  try {
-    await link(candidatePath, lockPath);
-    return true;
-  } catch (error) {
-    if (error?.code === "EEXIST" || error?.code === "ENOENT") {
-      return false;
-    }
-    throw error;
+  const child = spawn(FLOCK_COMMAND, [
+    "-n",
+    "-E",
+    String(HOLDER_BLOCKED_EXIT_CODE),
+    lockPath,
+    "/bin/sh",
+    "-c",
+    `printf '${HOLDER_READY}\n'; cat >/dev/null`
+  ], {
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  const result = await waitForLockHolder(child);
+  if (!result.acquired) {
+    child.stdin?.end();
+    return { acquired: false, child };
   }
-}
-
-function canTakeOver(lockRecord, staleMs) {
-  if (!lockRecord) {
-    return { allowed: true, reason: "missing-lock" };
-  }
-  if (!isHeartbeatStale(lockRecord, staleMs)) {
-    return { allowed: false, reason: "heartbeat-fresh" };
-  }
-  if (!isSameHost(lockRecord)) {
-    return { allowed: false, reason: "foreign-host" };
-  }
-  if (isProcessAlive(Number(lockRecord?.pid))) {
-    return { allowed: false, reason: "owner-alive" };
-  }
-  return { allowed: true, reason: "owner-dead" };
-}
-
-async function displaceStaleLock(lockPath, currentLock) {
-  const displacedPath = `${lockPath}.stale.${randomUUID()}`;
-  try {
-    await rename(lockPath, displacedPath);
-  } catch {
-    return null;
-  }
-  const displaced = await readLockFile(displacedPath);
-  const displacedToken = displaced?.token || null;
-  const expectedToken = currentLock?.token || null;
-  if (expectedToken && displacedToken && displacedToken !== expectedToken) {
-    await rename(displacedPath, lockPath).catch(() => {});
-    return null;
-  }
-  return displacedPath;
+  return { acquired: true, child };
 }
 
 export async function acquireLock({
   lockPath,
-  owner,
-  staleMs = 30000,
-  heartbeatMs = 500
+  owner
 }) {
   await ensureDir(path.dirname(lockPath));
-  const token = randomUUID();
-  const host = os.hostname();
   const currentLock = {
-    token,
+    token: randomUUID(),
     owner,
-    host,
+    host: os.hostname(),
     pid: process.pid,
     heartbeatAt: Date.now()
   };
-  const candidate = await createLockCandidate(lockPath, currentLock);
-  let recoveredStale = false;
-  let acquired = false;
+  const holder = await spawnLockHolder(lockPath);
+  if (!holder.acquired) {
+    return {
+      acquired: false,
+      recoveredStale: false,
+      currentLock: await readLockFile(lockPath),
+      reason: "locked"
+    };
+  }
 
   try {
-    while (true) {
-      if (await publishCandidate(lockPath, candidate.candidatePath)) {
-        acquired = true;
-        break;
-      }
-      const incumbentLock = await readLockFile(lockPath);
-      const takeover = canTakeOver(incumbentLock, staleMs);
-      if (!takeover.allowed) {
-        await candidate.handle.close().catch(() => {});
-        await rm(candidate.candidatePath, { force: true }).catch(() => {});
-        return {
-          acquired: false,
-          recoveredStale,
-          currentLock: incumbentLock,
-          reason: takeover.reason
-        };
-      }
-      const displacedPath = await displaceStaleLock(lockPath, incumbentLock);
-      if (!displacedPath) {
-        continue;
-      }
-      if (await publishCandidate(lockPath, candidate.candidatePath)) {
-        recoveredStale = true;
-        acquired = true;
-        await rm(displacedPath, { force: true }).catch(() => {});
-        break;
-      }
-      await rm(displacedPath, { force: true }).catch(() => {});
-    }
+    await writeLockMetadata(lockPath, currentLock);
   } catch (error) {
-    await candidate.handle.close().catch(() => {});
-    await rm(candidate.candidatePath, { force: true }).catch(() => {});
+    holder.child.stdin?.end();
     throw error;
   }
 
-  if (!acquired) {
-    await candidate.handle.close().catch(() => {});
-    await rm(candidate.candidatePath, { force: true }).catch(() => {});
-    throw new Error(`failed to acquire lock ${lockPath}`);
-  }
-
-  await rm(candidate.candidatePath, { force: true }).catch(() => {});
-
-  const heartbeat = setInterval(async () => {
-    try {
-      const diskLock = await readLockFile(lockPath);
-      if (diskLock?.token !== token) {
-        clearInterval(heartbeat);
-        return;
-      }
-      const now = new Date();
-      await candidate.handle.utimes(now, now);
-      currentLock.heartbeatAt = now.getTime();
-    } catch {
-      // Release handles cleanup; heartbeat is best-effort.
-    }
-  }, heartbeatMs);
-  heartbeat.unref?.();
-
   return {
     acquired: true,
-    recoveredStale,
+    recoveredStale: false,
     currentLock,
     async release() {
-      clearInterval(heartbeat);
-      try {
-        const diskLock = await readLockFile(lockPath);
-        if (diskLock?.token === token) {
-          await rm(lockPath, { force: true });
-        }
-      } finally {
-        await candidate.handle.close().catch(() => {});
-      }
+      holder.child.stdin?.end();
+      await new Promise((resolve) => {
+        holder.child.once("exit", () => resolve());
+        holder.child.once("close", () => resolve());
+      });
     }
   };
 }
