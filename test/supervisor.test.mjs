@@ -320,7 +320,59 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
               vendor: "anthropic"
             }),
             runtime: {
+              readOnlyMounts: ["/"]
+            }
+          },
+          beadId: "example-app-123",
+          providerName: "claude",
+          cwd: projectRoot,
+          writableRoot: projectRoot,
+          promptContents: "test prompt"
+        }),
+      /cannot overlap protected project, worktree, Beads, or control-plane paths/
+    );
+
+    await assert.rejects(
+      () =>
+        __prepareIsolatedProviderRunForTests({
+          projectRoot,
+          adapter,
+          config,
+          supervisorEnv,
+          providerConfig: {
+            ...fakeProviderConfig({
+              storePath: providerStorePath,
+              shimDir,
+              vendor: "anthropic"
+            }),
+            runtime: {
               readOnlyMounts: [path.dirname(projectRoot)]
+            }
+          },
+          beadId: "example-app-123",
+          providerName: "claude",
+          cwd: projectRoot,
+          writableRoot: projectRoot,
+          promptContents: "test prompt"
+        }),
+      /cannot overlap protected project, worktree, Beads, or control-plane paths/
+    );
+
+    await assert.rejects(
+      () =>
+        __prepareIsolatedProviderRunForTests({
+          projectRoot,
+          adapter,
+          config,
+          supervisorEnv,
+          providerConfig: {
+            ...fakeProviderConfig({
+              storePath: providerStorePath,
+              shimDir,
+              vendor: "anthropic"
+            }),
+            runtime: {
+              readOnlyMounts: [`${projectRoot}${path.sep}`]
             }
           },
           beadId: "example-app-123",

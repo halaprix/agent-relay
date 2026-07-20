@@ -470,15 +470,21 @@ function parentDirectories(targetPath) {
 }
 
 function isUnderAnyRoot(targetPath, roots) {
-  return roots.some((root) => targetPath === root || targetPath.startsWith(`${root}${path.sep}`));
+  return roots.some((root) => isSameOrDescendantPath(targetPath, root));
 }
 
 function overlapsAnyProtectedRoot(targetPath, roots) {
   return roots.some((root) =>
-    targetPath === root ||
-    targetPath.startsWith(`${root}${path.sep}`) ||
-    root.startsWith(`${targetPath}${path.sep}`)
+    isSameOrDescendantPath(targetPath, root) ||
+    isSameOrDescendantPath(root, targetPath)
   );
+}
+
+function isSameOrDescendantPath(targetPath, candidateRoot) {
+  const normalizedTarget = path.resolve(targetPath);
+  const normalizedRoot = path.resolve(candidateRoot);
+  const relative = path.relative(normalizedRoot, normalizedTarget);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 async function protectedRuntimeRoots({ projectRoot, config, adapter, writableRoot }) {

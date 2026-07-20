@@ -2,13 +2,12 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { open, readFile, stat, writeFile } from "node:fs/promises";
 import { ensureDir, pathExists } from "./fs.mjs";
 
 const FLOCK_COMMAND = "/usr/bin/flock";
-const HOLDER_READY = "agent-relay-lock-ready";
 const HOLDER_BLOCKED_EXIT_CODE = 42;
-const HOLDER_FAILURE_EXIT_CODE = 70;
+const HOLDER_FD = 3;
 
 async function readLockFile(lockPath) {
   if (!(await pathExists(lockPath))) {
@@ -33,13 +32,11 @@ async function writeLockMetadata(lockPath, lockRecord) {
   await writeFile(lockPath, `${JSON.stringify(lockRecord, null, 2)}\n`, "utf8");
 }
 
-async function waitForLockHolder(child) {
+async function waitForLockAttempt(child) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    let stdout = "";
     let stderr = "";
     const cleanup = () => {
-      child.stdout?.removeAllListeners();
       child.stderr?.removeAllListeners();
       child.removeAllListeners("exit");
       child.removeAllListeners("error");
@@ -54,12 +51,6 @@ async function waitForLockHolder(child) {
     };
     const onResolve = finish(resolve);
     const onReject = finish(reject);
-    child.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-      if (stdout.includes(`${HOLDER_READY}\n`)) {
-        onResolve({ acquired: true, stdout, stderr });
-      }
-    });
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
     });
@@ -67,39 +58,47 @@ async function waitForLockHolder(child) {
       onReject(error);
     });
     child.on("exit", (code, signal) => {
-      if (code === HOLDER_BLOCKED_EXIT_CODE) {
-        onResolve({ acquired: false, stdout, stderr, code, signal });
+      if (code === 0) {
+        onResolve({ acquired: true, stderr, code, signal });
         return;
       }
-      onReject(new Error(`flock holder failed with code ${code ?? "null"} signal ${signal ?? "null"}: ${stderr || stdout}`));
+      if (code === HOLDER_BLOCKED_EXIT_CODE) {
+        onResolve({ acquired: false, stderr, code, signal });
+        return;
+      }
+      onReject(new Error(`flock helper failed with code ${code ?? "null"} signal ${signal ?? "null"}: ${stderr}`));
     });
   });
 }
 
-async function spawnLockHolder(lockPath) {
+async function acquireKernelLock(lockPath) {
   if (process.platform !== "linux") {
     throw new Error("kernel-backed flock locks require Linux");
   }
   if (!(await pathExists(FLOCK_COMMAND))) {
     throw new Error("kernel-backed flock command is unavailable");
   }
+  const fileHandle = await open(lockPath, "a+");
   const child = spawn(FLOCK_COMMAND, [
+    "-x",
     "-n",
     "-E",
     String(HOLDER_BLOCKED_EXIT_CODE),
-    lockPath,
-    "/bin/sh",
-    "-c",
-    `printf '${HOLDER_READY}\n'; cat >/dev/null`
+    String(HOLDER_FD)
   ], {
-    stdio: ["pipe", "pipe", "pipe"]
+    stdio: ["ignore", "ignore", "pipe", fileHandle.fd]
   });
-  const result = await waitForLockHolder(child);
-  if (!result.acquired) {
-    child.stdin?.end();
-    return { acquired: false, child };
+  try {
+    const result = await waitForLockAttempt(child);
+    if (!result.acquired) {
+      await fileHandle.close();
+      return { acquired: false, currentLock: await readLockFile(lockPath) };
+    }
+    return { acquired: true, fileHandle };
+  } catch (error) {
+    await fileHandle.close().catch(() => {});
+    throw error;
   }
-  return { acquired: true, child };
 }
 
 export async function acquireLock({
@@ -114,12 +113,12 @@ export async function acquireLock({
     pid: process.pid,
     heartbeatAt: Date.now()
   };
-  const holder = await spawnLockHolder(lockPath);
-  if (!holder.acquired) {
+  const kernelLock = await acquireKernelLock(lockPath);
+  if (!kernelLock.acquired) {
     return {
       acquired: false,
       recoveredStale: false,
-      currentLock: await readLockFile(lockPath),
+      currentLock: kernelLock.currentLock,
       reason: "locked"
     };
   }
@@ -127,20 +126,21 @@ export async function acquireLock({
   try {
     await writeLockMetadata(lockPath, currentLock);
   } catch (error) {
-    holder.child.stdin?.end();
+    await kernelLock.fileHandle.close().catch(() => {});
     throw error;
   }
 
+  let released = false;
   return {
     acquired: true,
     recoveredStale: false,
     currentLock,
     async release() {
-      holder.child.stdin?.end();
-      await new Promise((resolve) => {
-        holder.child.once("exit", () => resolve());
-        holder.child.once("close", () => resolve());
-      });
+      if (released) {
+        return;
+      }
+      released = true;
+      await kernelLock.fileHandle.close();
     }
   };
 }

@@ -74,7 +74,7 @@ async function waitForExit(child) {
   await new Promise((resolve) => child.once("exit", resolve));
 }
 
-test("acquireLock blocks a second holder while the first kernel flock is active", { timeout: 10000 }, async () => {
+test("acquireLock keeps the kernel lock after the flock helper exits, then releases for reacquire", { timeout: 10000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
   const lockPath = path.join(root, "locks", "bead.lock.json");
   await mkdir(path.dirname(lockPath), { recursive: true });
@@ -94,6 +94,13 @@ test("acquireLock blocks a second holder while the first kernel flock is active"
   assert.equal(blocked.currentLock.owner, "run:1");
 
   await first.release();
+
+  const reacquired = await acquireLock({
+    lockPath,
+    owner: "run:3"
+  });
+  assert.equal(reacquired.acquired, true);
+  await reacquired.release();
 });
 
 test("kernel flock yields exactly one multi-process owner across 24 contenders", { timeout: 15000 }, async () => {
