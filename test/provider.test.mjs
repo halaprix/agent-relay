@@ -6,6 +6,21 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
 import { classifyProviderFailure, parseWorkerReport, runProviderCommand } from "../src/lib/provider.mjs";
 
+async function waitForMarkerLines(markerPath, minimumLines, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const contents = await readFile(markerPath, "utf8").catch(() => "");
+    const lines = contents.trim().split("\n").filter(Boolean);
+    if (lines.length >= minimumLines) {
+      return lines;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`marker did not reach ${minimumLines} lines within ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 test("parseWorkerReport accepts pure json", () => {
   const report = parseWorkerReport('{"status":"success","summary":"ok","ownedPaths":[],"commandsAttempted":[],"changedPaths":[]}');
   assert.equal(report.status, "success");
@@ -32,14 +47,14 @@ test("runProviderCommand times out by killing the process group and stops child 
     env: {
       PROVIDER_TIMEOUT_MARKER: markerPath
     },
-    timeoutMs: 100
+    timeoutMs: 500
   });
   assert.equal(result.timedOut, true);
   assert.equal(result.signal, "SIGKILL");
+  const writes = await waitForMarkerLines(markerPath, 1);
   const firstStat = await stat(markerPath);
   await new Promise((resolve) => setTimeout(resolve, 300));
   const secondStat = await stat(markerPath);
   assert.equal(secondStat.size, firstStat.size);
-  const writes = (await readFile(markerPath, "utf8")).trim().split("\n").filter(Boolean);
   assert.ok(writes.length >= 1);
 });

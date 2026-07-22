@@ -6,6 +6,7 @@ const markerPath = process.env.PROVIDER_TIMEOUT_MARKER;
 
 if (process.argv.includes("--child")) {
   process.on("SIGTERM", () => {});
+  await appendFile(markerPath, "child-ready\n", "utf8");
   setInterval(async () => {
     await appendFile(markerPath, `${Date.now()}\n`, "utf8");
   }, 50);

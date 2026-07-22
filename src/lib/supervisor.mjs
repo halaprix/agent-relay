@@ -484,7 +484,14 @@ function isSameOrDescendantPath(targetPath, candidateRoot) {
   const normalizedTarget = path.resolve(targetPath);
   const normalizedRoot = path.resolve(candidateRoot);
   const relative = path.relative(normalizedRoot, normalizedTarget);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative)
+    )
+  );
 }
 
 async function protectedRuntimeRoots({ projectRoot, config, adapter, writableRoot }) {

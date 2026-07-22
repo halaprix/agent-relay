@@ -4,6 +4,21 @@ import { chmod, cp, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
 import { writeJson } from "../src/lib/fs.mjs";
 
+export async function createRepoFixture({ exclude = [] } = {}) {
+  const fixtureRoot = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-repo-")), "repo");
+  const excluded = new Set([".git", "node_modules", ...exclude]);
+  await cp(repoPath(), fixtureRoot, {
+    recursive: true,
+    filter(source) {
+      const relative = path.relative(repoPath(), source);
+      return ![...excluded].some(
+        (prefix) => relative === prefix || relative.startsWith(`${prefix}${path.sep}`)
+      );
+    }
+  });
+  return fixtureRoot;
+}
+
 export async function createProjectFixture() {
   const projectRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-project-"));
   await cp(repoPath("test", "fixtures", "project-template"), projectRoot, { recursive: true });

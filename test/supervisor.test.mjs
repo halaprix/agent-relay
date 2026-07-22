@@ -384,6 +384,60 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       /cannot overlap protected project, worktree, Beads, or control-plane paths/
     );
 
+    const dotDotRuntimeChild = path.join(projectRoot, "..runtime");
+    const dotDotRuntimeSibling = path.join(path.dirname(projectRoot), "runtime");
+    await mkdir(dotDotRuntimeChild, { recursive: true });
+    await mkdir(dotDotRuntimeSibling, { recursive: true });
+
+    await assert.rejects(
+      () =>
+        __prepareIsolatedProviderRunForTests({
+          projectRoot,
+          adapter,
+          config,
+          supervisorEnv,
+          providerConfig: {
+            ...fakeProviderConfig({
+              storePath: providerStorePath,
+              shimDir,
+              vendor: "anthropic"
+            }),
+            runtime: {
+              readOnlyMounts: [dotDotRuntimeChild]
+            }
+          },
+          beadId: "example-app-123",
+          providerName: "claude",
+          cwd: projectRoot,
+          writableRoot: projectRoot,
+          promptContents: "test prompt"
+        }),
+      /cannot overlap protected project, worktree, Beads, or control-plane paths/
+    );
+
+    const siblingIsolated = await __prepareIsolatedProviderRunForTests({
+      projectRoot,
+      adapter,
+      config,
+      supervisorEnv,
+      providerConfig: {
+        ...fakeProviderConfig({
+          storePath: providerStorePath,
+          shimDir,
+          vendor: "anthropic"
+        }),
+        runtime: {
+          readOnlyMounts: [dotDotRuntimeSibling]
+        }
+      },
+      beadId: "example-app-123",
+      providerName: "claude",
+      cwd: projectRoot,
+      writableRoot: projectRoot,
+      promptContents: "test prompt"
+    });
+    assert.notEqual(indexOfMount(siblingIsolated.args, dotDotRuntimeSibling), -1);
+
     const externalGitRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-external-git-"));
     const externalGitDir = path.join(externalGitRoot, "worktrees", "wt");
     const externalCommonDir = path.join(externalGitRoot, "common");
