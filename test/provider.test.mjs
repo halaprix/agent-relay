@@ -51,10 +51,10 @@ test("runProviderCommand times out by killing the process group and stops child 
   });
   assert.equal(result.timedOut, true);
   assert.equal(result.signal, "SIGKILL");
-  const writes = await waitForMarkerLines(markerPath, 1);
+  const writes = await waitForMarkerLines(markerPath, 2);
   const firstStat = await stat(markerPath);
   await new Promise((resolve) => setTimeout(resolve, 300));
   const secondStat = await stat(markerPath);
   assert.equal(secondStat.size, firstStat.size);
-  assert.ok(writes.length >= 1);
+  assert.ok(writes.length >= 2);
 });

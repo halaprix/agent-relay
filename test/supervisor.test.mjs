@@ -384,8 +384,11 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       /cannot overlap protected project, worktree, Beads, or control-plane paths/
     );
 
-    const dotDotRuntimeChild = path.join(projectRoot, "..runtime");
-    const dotDotRuntimeSibling = path.join(path.dirname(projectRoot), "runtime");
+    const dotDotRuntimeAncestor = await mkdtemp(path.join(os.tmpdir(), "agent-relay-dotdot-runtime-"));
+    const dotDotRuntimeRoot = path.join(dotDotRuntimeAncestor, "protected-root");
+    const dotDotRuntimeChild = path.join(dotDotRuntimeRoot, "..runtime");
+    const dotDotRuntimeSibling = path.join(dotDotRuntimeAncestor, "runtime");
+    await mkdir(dotDotRuntimeRoot, { recursive: true });
     await mkdir(dotDotRuntimeChild, { recursive: true });
     await mkdir(dotDotRuntimeSibling, { recursive: true });
 
@@ -408,8 +411,8 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
           },
           beadId: "example-app-123",
           providerName: "claude",
-          cwd: projectRoot,
-          writableRoot: projectRoot,
+          cwd: dotDotRuntimeRoot,
+          writableRoot: dotDotRuntimeRoot,
           promptContents: "test prompt"
         }),
       /cannot overlap protected project, worktree, Beads, or control-plane paths/
@@ -432,8 +435,8 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       },
       beadId: "example-app-123",
       providerName: "claude",
-      cwd: projectRoot,
-      writableRoot: projectRoot,
+      cwd: dotDotRuntimeRoot,
+      writableRoot: dotDotRuntimeRoot,
       promptContents: "test prompt"
     });
     assert.notEqual(indexOfMount(siblingIsolated.args, dotDotRuntimeSibling), -1);
