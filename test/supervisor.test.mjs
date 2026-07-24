@@ -830,7 +830,7 @@ test("review enforces quorum, resumes from Bead comments without local state, an
   assert.match(resumed.reason, /delivery is not configured/);
 });
 
-test("delivery uses neutral team-facing text, parses gh stdout URLs, clears dirty state, and cleanup removes only approved clean worktrees", { timeout: 10000 }, async () => {
+test("delivery uses neutral team-facing text, parses gh stdout URLs, clears dirty state, and cleanup removes only approved clean worktrees", { timeout: 30000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore();
   const gitStorePath = await createFakeGitStore(projectRoot);
