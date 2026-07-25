@@ -188,12 +188,20 @@ test("doctor honors the requested adapter and validates required files", { timeo
 test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bubblewrap mounts with share-net, readonly blockers, and a writable sandbox HOME", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore();
+  const requiredBeadsDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-beads-required-"));
   const gitStorePath = await createFakeGitStore(projectRoot);
   const shimDir = await createGateShimPath();
   const providerStorePath = await createFakeProviderStore([]);
   const { adapter } = await loadAdapter("example-app");
+  const testAdapter = {
+    ...adapter,
+    beads: {
+      ...adapter.beads,
+      requiredDir: requiredBeadsDir
+    }
+  };
   const config = baseConfig(projectRoot, gitStorePath);
-  const supervisorEnv = relayEnv({ bdStorePath, gitStorePath });
+  const supervisorEnv = relayEnv({ bdStorePath, gitStorePath, extra: { BEADS_DIR: requiredBeadsDir } });
   const reviewArtifactSource = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-review-artifact-")), "reviewed.json");
   await writeFile(reviewArtifactSource, '{"artifact":true}\n', "utf8");
 
@@ -201,7 +209,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
     () =>
       __prepareIsolatedProviderRunForTests({
         projectRoot,
-        adapter,
+        adapter: testAdapter,
         config,
         supervisorEnv,
         providerConfig: {
@@ -225,7 +233,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
   try {
     const isolated = await __prepareIsolatedProviderRunForTests({
       projectRoot,
-      adapter,
+      adapter: testAdapter,
       config,
       supervisorEnv,
       providerConfig: {
@@ -254,12 +262,12 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
     assert.equal(isolated.command, "/usr/bin/bwrap");
     assert.match(isolated.env.HOME, new RegExp(`^${projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.agent-relay-sandbox/`));
     assert.equal(isolated.args.includes("--share-net"), true);
-    assert.equal(isolated.env.BEADS_DIR, "/home/example-user/.example-beads");
+    assert.equal(isolated.env.BEADS_DIR, requiredBeadsDir);
     assert.equal(isolated.env.AGENT_RELAY_BD_BIN, repoPath("test", "fixtures", "fake-bd.mjs"));
     const runtimeMountIndex = indexOfMount(isolated.args, shimDir);
     assert.notEqual(runtimeMountIndex, -1);
     assert.equal(isolated.args[runtimeMountIndex], "--ro-bind");
-    const beadsMountIndex = indexOfMount(isolated.args, "/home/example-user/.example-beads");
+    const beadsMountIndex = indexOfMount(isolated.args, requiredBeadsDir);
     assert.notEqual(beadsMountIndex, -1);
     assert.equal(isolated.args[beadsMountIndex], "--ro-bind");
     const bdMountIndex = indexOfMount(isolated.args, repoPath("test", "fixtures", "fake-bd.mjs"));
@@ -284,7 +292,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       () =>
         __prepareIsolatedProviderRunForTests({
           projectRoot,
-          adapter,
+          adapter: testAdapter,
           config,
           supervisorEnv,
           providerConfig: {
@@ -310,7 +318,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       () =>
         __prepareIsolatedProviderRunForTests({
           projectRoot,
-          adapter,
+          adapter: testAdapter,
           config,
           supervisorEnv,
           providerConfig: {
@@ -336,7 +344,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       () =>
         __prepareIsolatedProviderRunForTests({
           projectRoot,
-          adapter,
+          adapter: testAdapter,
           config,
           supervisorEnv,
           providerConfig: {
@@ -362,7 +370,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       () =>
         __prepareIsolatedProviderRunForTests({
           projectRoot,
-          adapter,
+          adapter: testAdapter,
           config,
           supervisorEnv,
           providerConfig: {
@@ -396,7 +404,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       () =>
         __prepareIsolatedProviderRunForTests({
           projectRoot,
-          adapter,
+          adapter: testAdapter,
           config,
           supervisorEnv,
           providerConfig: {
@@ -420,7 +428,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
 
     const siblingIsolated = await __prepareIsolatedProviderRunForTests({
       projectRoot,
-      adapter,
+      adapter: testAdapter,
       config,
       supervisorEnv,
       providerConfig: {
@@ -454,7 +462,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       () =>
         __prepareIsolatedProviderRunForTests({
           projectRoot,
-          adapter,
+          adapter: testAdapter,
           config,
           supervisorEnv,
           providerConfig: {
