@@ -24,7 +24,7 @@ test("guardrails reject writes outside owned paths", () => {
 
 test("privacy scan allows git transport and rejects personal emails", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-privacy-"));
-  const transport = ["git", "@", "github.com:example-user/agent-relay.git (fetch)"].join("");
+  const transport = ["git", "@", "github.com:example-org/agent-relay.git (fetch)"].join("");
   const generated = ["Generated", " with ", "Codex"].join("");
   const personalEmail = ["person", "@", "example.net"].join("");
   await createTextFile(path.join(dir, "remote.txt"), `${"origin "} ${transport}`.replace("  ", " "));

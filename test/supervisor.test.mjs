@@ -32,6 +32,7 @@ import {
   createFakeGitStore,
   createFakeProviderStore,
   createProjectFixture,
+  defaultAdapterBeadsDir,
   seedRelayConfig,
   writeState
 } from "./helpers.mjs";
@@ -46,7 +47,7 @@ test.after(() => {
 
 function relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra = {} }) {
   return {
-    BEADS_DIR: "/home/example-user/.example-beads",
+    BEADS_DIR: defaultAdapterBeadsDir,
     AGENT_RELAY_BD_BIN: repoPath("test", "fixtures", "fake-bd.mjs"),
     FAKE_BD_STORE: bdStorePath,
     FAKE_GATE_STORE: gateStorePath,

@@ -1,8 +1,12 @@
 import os from "node:os";
 import path from "node:path";
-import { chmod, cp, mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
 import { writeJson } from "../src/lib/fs.mjs";
+
+export const defaultAdapterBeadsDir = JSON.parse(
+  await readFile(repoPath("adapters", "example-app.json"), "utf8")
+).beads.requiredDir;
 
 export async function createRepoFixture({ exclude = [] } = {}) {
   const fixtureRoot = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-repo-")), "repo");
@@ -55,7 +59,7 @@ export async function createFakeBdStore(overrides = {}) {
     claimConflict: false
   };
   const store = {
-    path: "/home/example-user/.example-beads",
+    path: defaultAdapterBeadsDir,
     whereDetails: [
       "database: embedded-dolt",
       "status: healthy"
@@ -105,7 +109,7 @@ export async function createFakeGitStore(projectRoot, overrides = {}) {
     baseSha: "base-sha-123",
     mainHead: "base-sha-123",
     mainBranch: "dev",
-    remotes: "origin git@github.com:example-user/agent-relay.git (fetch)\norigin git@github.com:example-user/agent-relay.git (push)",
+    remotes: "origin git@github.com:example-org/agent-relay.git (fetch)\norigin git@github.com:example-org/agent-relay.git (push)",
     mainStatusQueue: [],
     worktrees: {},
     records: {
