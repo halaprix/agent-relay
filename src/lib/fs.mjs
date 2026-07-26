@@ -36,7 +36,7 @@ export async function removePath(targetPath) {
   await rm(targetPath, { recursive: true, force: true });
 }
 
-export async function listFilesRecursive(rootDir) {
+export async function listFilesRecursive(rootDir, { ignoreDirNames = [] } = {}) {
   const files = [];
   if (!(await pathExists(rootDir))) {
     return files;
@@ -44,7 +44,10 @@ export async function listFilesRecursive(rootDir) {
   for (const entry of await readdir(rootDir, { withFileTypes: true })) {
     const fullPath = path.join(rootDir, entry.name);
     if (entry.isDirectory()) {
-      files.push(...(await listFilesRecursive(fullPath)));
+      if (ignoreDirNames.includes(entry.name)) {
+        continue;
+      }
+      files.push(...(await listFilesRecursive(fullPath, { ignoreDirNames })));
       continue;
     }
     files.push(fullPath);

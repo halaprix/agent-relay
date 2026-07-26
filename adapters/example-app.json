@@ -10,7 +10,8 @@
     ]
   },
   "beads": {
-    "requiredDir": "/home/example-user/.example-beads",
+    "requiredDir": ".beads",
+    "tracked": false,
     "memoryKey": "agent-instruction-files-structure"
   },
   "guidance": {
@@ -32,7 +33,8 @@
       "docs/adr"
     ],
     "prTemplate": ".github/PULL_REQUEST_TEMPLATE.md",
-    "noAttribution": true
+    "noAttribution": true,
+    "resourcesRoot": ".resources"
   },
   "gates": {
     "routing": {
@@ -178,6 +180,7 @@
   },
   "controlPlane": {
     "protectedPaths": [
+      ".beads",
       ".github/workflows",
       ".claude",
       ".codex",

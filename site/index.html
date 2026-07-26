@@ -42,10 +42,20 @@ Neutral supervisor
         <h2>Safety model</h2>
         <ul>
           <li>Workers use <code>bd --readonly</code>; the supervisor is the only Beads writer.</li>
+          <li>The Beads store is the project-local <code>.beads/</code> directory, git-ignored by default and never writable by workers.</li>
           <li>Protected paths, blanket staging, remote mutation, and attribution are blocked.</li>
           <li>Dirty worktrees are preserved for inspection instead of being deleted automatically.</li>
           <li>Review-clean PR delivery runs only when delivery is configured; otherwise the run pauses for a human.</li>
           <li>Version 0.1 is a local CLI/plugin package; a transient user service is optional future work, not a packaged requirement.</li>
+        </ul>
+      </section>
+      <section>
+        <h2>Reference resources</h2>
+        <ul>
+          <li><code>.resources/</code> at the repository root is the standard, git-ignored cache of external documentation for agents.</li>
+          <li>One topic per subdirectory with a <code>SOURCE.md</code> recording the origin URL and fetch date.</li>
+          <li>It is excluded from snapshots, diffs, review bundles, privacy scans, and link checks, so it can never reach a PR.</li>
+          <li>Workers receive it read-only through <code>AGENT_RELAY_RESOURCES_DIR</code>; project law always outranks it.</li>
         </ul>
       </section>
       <section>

@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { readFile } from "node:fs/promises";
+import { REPO_SCAN_IGNORE_DIRS } from "../src/lib/constants.mjs";
 import { listFilesRecursive, pathExists } from "../src/lib/fs.mjs";
 import { repoPath } from "../src/lib/paths.mjs";
 
-const files = (await listFilesRecursive(repoPath())).filter((filePath) => /\.(md|html|json)$/i.test(filePath));
+const files = (await listFilesRecursive(repoPath(), { ignoreDirNames: REPO_SCAN_IGNORE_DIRS })).filter((filePath) =>
+  /\.(md|html|json)$/i.test(filePath)
+);
 const missing = [];
 for (const filePath of files) {
   const text = await readFile(filePath, "utf8");

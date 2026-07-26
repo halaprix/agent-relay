@@ -9,16 +9,22 @@ Use `relay` when the project wants Claude, Codex, and agy to share the same Bead
 
 ## Workflow
 
-1. Run `relay setup --adapter example-app` from the project root.
+1. Ensure the project has a local Beads store (`bd init --quiet` creates `.beads/`), then run `relay setup --adapter example-app` from the project root.
 2. Confirm `relay doctor --json` reports valid manifests, roles, adapters, and local state.
 3. Plan the target Bead with `relay plan <bead-id>`.
 4. Execute with `relay run <bead-id>` or reattach with `relay resume <bead-id>`.
 5. Inspect checkpoints with `relay status [bead-id]`, `relay review <bead-id>`, and `relay gates <bead-id> [gate-name]`.
 6. Use `relay cleanup <bead-id>` only after the human has reviewed the retained worktree state.
 
+## Reference resources
+
+- Cache external documentation under the repository-root `.resources/` directory, one topic per subdirectory with a `SOURCE.md` naming the origin URL and fetch date.
+- `.resources/` is always git-ignored, never reviewed, and never part of a diff or PR. Workers see it read-only through `AGENT_RELAY_RESOURCES_DIR`.
+- Project law (`AGENTS.md`, architecture docs, ADRs, the adapter) outranks anything cached there; re-fetch stale entries instead of editing them.
+
 ## Guardrails
 
-- Beads is the only durable task system; workers use `bd --readonly`.
+- Beads is the only durable task system; the store is the project-local `.beads/` directory and workers use `bd --readonly`.
 - Workers stay inside assigned worktrees and owned paths.
 - The supervisor blocks blanket staging, force-push, remote mutation, protected control-plane edits, and AI attribution.
 - Automation stops at a review-clean PR for human merge.

@@ -64,17 +64,43 @@ All commands return structured JSON and one of these stable exit classes:
 
 `adapters/example-app.json` encodes the first project adapter:
 
-- `BEADS_DIR` must resolve to `/home/example-user/.example-beads`.
+- The Beads store is the project-local `.beads/` directory created by `bd init`; no global store and no machine-specific path is involved.
 - `scripts/dev/worktree-setup.sh` is the required worktree bootstrap command.
 - `AGENTS.md`, architecture docs, and ADRs remain project law.
 - Protected control-plane paths block worker writes unless the run is explicitly in plugin-maintenance mode.
 
-`relay setup` writes only local state beneath `.agents/agent-relay/`, adds that directory to local Git exclude state when available, and synchronizes provider role bundles into existing provider directories. It never overwrites `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `STATE.md`, or architecture documents.
+`relay setup` writes only local state beneath `.agents/agent-relay/` plus the ignored `.resources/` cache, adds both to local Git exclude state when available, and synchronizes provider role bundles into existing provider directories. It never overwrites `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `STATE.md`, or architecture documents.
+
+## Reference resources (`.resources/`)
+
+`.resources/` is the standard, never-committed cache of external reference material for every repository Agent Relay touches, including this one. Agents keep upstream documentation there instead of refetching it, guessing at it, or committing it.
+
+Rules:
+
+- Location is the repository root: `.resources/`. Adapters may relocate it with `guidance.resourcesRoot`.
+- It is ignored by Git. This repository ignores it through `.gitignore`; `relay setup` adds `<resourcesRoot>/` to the target project's local Git exclude state next to `.agents/agent-relay/`.
+- One topic per directory, each with a `SOURCE.md` recording the origin URL and the fetch date. Example: `.resources/beads/` for the Beads issue tracker documentation at `https://beads.gascity.com/`.
+- It is a cache, not law. `AGENTS.md`, architecture documents, ADRs, and the adapter always win. Entries may be stale, so re-fetch rather than editing them in place.
+- It is never a deliverable. `.resources/` is excluded from worktree snapshots, scope-locked diff artifacts, review bundles, privacy scans, and link checks, so nothing cached there can reach a PR.
+- Workers get it read-only. The supervisor bind-mounts the project's resources root into the isolated sandbox read-only and exports `AGENT_RELAY_RESOURCES_DIR`; writes belong to the human or the supervisor.
+
+`relay setup` creates the directory and a `README.md` restating these rules, and `relay doctor` reports `resourcesRoot` plus whether it is actually ignored.
+
+## Beads store
+
+The Beads store is project-local. `adapter.beads.requiredDir` defaults to `.beads`, resolved against the project root, which is exactly where `bd init` creates the embedded Dolt database (`.beads/embeddeddolt/`). Nothing depends on a shared or per-user store.
+
+- The supervisor derives `BEADS_DIR` from the project itself and exports it for every `bd` call. An inherited `BEADS_DIR` that points somewhere else is rejected instead of silently winning.
+- `bd where` must resolve inside that store; the embedded database directory beneath it counts as a match.
+- Tracking is an adapter choice. `beads.tracked: false` (default) keeps the store out of Git and `relay setup` adds `.beads/` to local Git exclude state; Dolt still synchronizes it over the Git remote through `refs/dolt/data`. Set `beads.tracked: true` for projects that commit the store, and Agent Relay leaves ignore state alone.
+- Either way the store is protected control-plane state: workers never write it, and `.beads` sits in `controlPlane.protectedPaths`.
+- Absolute `requiredDir` values still work for projects that genuinely need an external store.
+- `relay doctor` reports `beadsDir`, `beadsTracked`, and `beadsStorePresent`, and fails with `project-misconfigured` when the store is missing so the human can run `bd init --quiet`.
 
 ## Beads ownership and recovery
 
-- The neutral supervisor is the only Beads writer. In production Bubblewrap runs, workers receive `BEADS_DIR` mounted read-only plus a read-only `bd` executable for `bd --readonly ...`; the test-only fallback withholds the host Beads store because it lacks OS isolation.
-- Every run verifies `BEADS_DIR`, parses `bd where`, primes memories, falls back to `bd memories --json` when needed, checks the required live-store key, validates dependencies, and atomically claims the requested Bead once.
+- The neutral supervisor is the only Beads writer. In production Bubblewrap runs, workers receive the project store mounted read-only plus a read-only `bd` executable for `bd --readonly ...`; the test-only fallback withholds the Beads store because it lacks OS isolation.
+- Every run resolves the project store, parses `bd where`, primes memories, falls back to `bd memories --json` when needed, checks the required live-store key, validates dependencies, and atomically claims the requested Bead once.
 - Structured checkpoints are appended with `bd comments add`; resume can rebuild state from Bead comments if the local ledger is gone.
 - `.agents/agent-relay/state/*.jsonl` is only a reconstructible operational ledger. If it disappears, a run is still recoverable from Beads plus Git and worktree state.
 - Persisted run state tracks the live phase machine (`planning`, `awaiting-plan-approval`, `implementing`, `reviewing`, `delivering`, `awaiting-human`, `complete`) plus `planReview`, `pendingCorrection`, and review quorum metadata.

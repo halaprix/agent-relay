@@ -102,6 +102,27 @@ test("canonical diff artifacts preserve exact bytes, deletions, executable mode,
   assert.equal(driftedBinary.bytesBase64, Buffer.from([0x81]).toString("base64"));
 });
 
+test("scope-locked diffs ignore the reference cache and relay state", { timeout: 15000 }, async () => {
+  const projectRoot = await createRealGitProjectFixture();
+  await mkdir(path.join(projectRoot, "src"), { recursive: true });
+  await writeFile(path.join(projectRoot, "src", "base.txt"), "base\n", "utf8");
+  await runGitCommand(projectRoot, ["add", "."]);
+  await runGitCommand(projectRoot, ["commit", "-m", "fixture"]);
+
+  const beforeSnapshot = await captureSnapshot(projectRoot, { ignorePrefixes: [".git"] });
+  await mkdir(path.join(projectRoot, ".resources", "beads"), { recursive: true });
+  await writeFile(path.join(projectRoot, ".resources", "beads", "upstream.md"), "cached docs\n", "utf8");
+  await writeFile(path.join(projectRoot, "src", "base.txt"), "changed\n", "utf8");
+
+  const artifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-resources-")), "worktree.json");
+  const { changedPaths } = await buildScopeLockedDiffArtifact({
+    worktreePath: projectRoot,
+    beforeSnapshot,
+    filePath: artifactPath
+  });
+  assert.deepEqual(changedPaths, ["src/base.txt"]);
+});
+
 test("broken symlinks remain symlinks in reviewed and staged artifacts", { timeout: 15000 }, async () => {
   const projectRoot = await createRealGitProjectFixture();
   const gitConfig = {

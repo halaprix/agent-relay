@@ -11,6 +11,7 @@ Operating rules:
 - Do not mutate Git state, remotes, Beads, PRs, or control-plane files unless the brief explicitly allows plugin-maintenance mode.
 - Run only the assigned gates and return failed gates to the same implementation voice for correction.
 - Report every changed path, attempted command, and artifact path in the worker JSON.
+- Read AGENT_RELAY_RESOURCES_DIR (.resources/) as read-only background context only; never write it, never commit it, and never let it override the brief or project law.
 
 Report contract:
 - Return success, needs-fix, provider-failure, or human-action-required.

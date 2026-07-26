@@ -22,6 +22,16 @@ test("guardrails reject writes outside owned paths", () => {
   );
 });
 
+test("privacy scan skips the cached reference resources root", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-privacy-resources-"));
+  const generated = ["Generated", " with ", "Codex"].join("");
+  await createTextFile(path.join(dir, ".resources", "beads", "upstream.md"), generated);
+  assert.deepEqual(await scanPrivacy(dir), []);
+
+  await createTextFile(path.join(dir, "tracked.md"), generated);
+  assert.equal((await scanPrivacy(dir)).length, 1);
+});
+
 test("privacy scan allows git transport and rejects personal emails", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-privacy-"));
   const transport = ["git", "@", "github.com:example-org/agent-relay.git (fetch)"].join("");

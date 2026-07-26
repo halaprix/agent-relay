@@ -1,6 +1,6 @@
 import path from "node:path";
 import { readFile } from "node:fs/promises";
-import { ATTRIBUTION_PATTERNS, PROTECTED_COMMAND_PATTERNS } from "./constants.mjs";
+import { ATTRIBUTION_PATTERNS, PROTECTED_COMMAND_PATTERNS, REPO_SCAN_IGNORE_DIRS } from "./constants.mjs";
 import { listFilesRecursive, relativeIsInside, toPosixRelative } from "./fs.mjs";
 
 export function assertCommandsAllowed(commands) {
@@ -26,9 +26,9 @@ export function assertOwnedPaths({ ownedPaths, changedPaths, protectedPaths, mod
   }
 }
 
-export async function scanPrivacy(rootDir) {
+export async function scanPrivacy(rootDir, { ignoreDirNames = REPO_SCAN_IGNORE_DIRS } = {}) {
   const findings = [];
-  const files = await listFilesRecursive(rootDir);
+  const files = await listFilesRecursive(rootDir, { ignoreDirNames });
   for (const filePath of files) {
     if (filePath.includes(`${path.sep}.git${path.sep}`) || filePath.endsWith(".png")) {
       continue;

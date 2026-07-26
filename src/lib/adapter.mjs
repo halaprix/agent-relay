@@ -1,5 +1,6 @@
 import path from "node:path";
 import { readFile, readdir } from "node:fs/promises";
+import { RESOURCES_DIR_NAME } from "./constants.mjs";
 import { readJson, writeJson } from "./fs.mjs";
 import { repoPath } from "./paths.mjs";
 import { assertString, assertStringArray, requireKeys } from "./schema.mjs";
@@ -9,6 +10,37 @@ export async function loadAdapter(adapterName) {
   const adapter = await readJson(adapterPath);
   validateAdapter(adapter);
   return { adapter, adapterPath };
+}
+
+function assertRelativeResourcesRoot(resourcesRoot) {
+  if (path.isAbsolute(resourcesRoot) || resourcesRoot.split(/[\\/]/).includes("..")) {
+    throw new Error("adapter.guidance.resourcesRoot must be a relative path inside the project");
+  }
+}
+
+export function resolveResourcesRootName(adapter) {
+  const configured = adapter?.guidance?.resourcesRoot;
+  if (typeof configured !== "string" || configured.trim() === "") {
+    return RESOURCES_DIR_NAME;
+  }
+  assertRelativeResourcesRoot(configured);
+  return configured;
+}
+
+export function resolveBeadsDir(adapter, projectRoot) {
+  const requiredDir = adapter?.beads?.requiredDir;
+  assertString(requiredDir, "adapter.beads.requiredDir");
+  if (path.isAbsolute(requiredDir)) {
+    return path.normalize(requiredDir);
+  }
+  if (!projectRoot) {
+    throw new Error("projectRoot is required to resolve a project-relative beads store");
+  }
+  return path.resolve(projectRoot, requiredDir);
+}
+
+export function beadsStoreIsTracked(adapter) {
+  return adapter?.beads?.tracked === true;
 }
 
 export function validateAdapter(adapter) {
@@ -37,6 +69,12 @@ export function validateAdapter(adapter) {
   requireKeys("adapter.beads", adapter.beads, ["requiredDir", "memoryKey"]);
   assertString(adapter.beads.requiredDir, "adapter.beads.requiredDir");
   assertString(adapter.beads.memoryKey, "adapter.beads.memoryKey");
+  if (!path.isAbsolute(adapter.beads.requiredDir) && adapter.beads.requiredDir.split(/[\\/]/).includes("..")) {
+    throw new Error("adapter.beads.requiredDir must stay inside the project when it is relative");
+  }
+  if (adapter.beads.tracked !== undefined && typeof adapter.beads.tracked !== "boolean") {
+    throw new Error("adapter.beads.tracked must be boolean");
+  }
   requireKeys("adapter.guidance", adapter.guidance, [
     "requiredFiles",
     "protectedLawFiles",
@@ -50,6 +88,10 @@ export function validateAdapter(adapter) {
   assertString(adapter.guidance.prTemplate, "adapter.guidance.prTemplate");
   if (typeof adapter.guidance.noAttribution !== "boolean") {
     throw new Error("adapter.guidance.noAttribution must be boolean");
+  }
+  if (adapter.guidance.resourcesRoot !== undefined) {
+    assertString(adapter.guidance.resourcesRoot, "adapter.guidance.resourcesRoot");
+    assertRelativeResourcesRoot(adapter.guidance.resourcesRoot);
   }
   requireKeys("adapter.gates", adapter.gates, ["routing", "groups"]);
   requireKeys("adapter.gates.routing", adapter.gates.routing, [

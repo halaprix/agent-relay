@@ -4,9 +4,13 @@ import { chmod, cp, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises
 import { repoPath } from "../src/lib/paths.mjs";
 import { writeJson } from "../src/lib/fs.mjs";
 
-export const defaultAdapterBeadsDir = JSON.parse(
+export const defaultAdapterBeadsRoot = JSON.parse(
   await readFile(repoPath("adapters", "example-app.json"), "utf8")
 ).beads.requiredDir;
+
+export function beadsDirFor(projectRoot) {
+  return path.resolve(projectRoot, defaultAdapterBeadsRoot);
+}
 
 export async function createRepoFixture({ exclude = [] } = {}) {
   const fixtureRoot = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-repo-")), "repo");
@@ -44,7 +48,7 @@ export async function writeState(projectRoot, beadId, state) {
   await writeJson(path.join(root, `${beadId}.json`), state);
 }
 
-export async function createFakeBdStore(overrides = {}) {
+export async function createFakeBdStore({ projectRoot = null, ...overrides } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-bd-"));
   const storePath = path.join(dir, "store.json");
   const defaultIssue = {
@@ -59,7 +63,7 @@ export async function createFakeBdStore(overrides = {}) {
     claimConflict: false
   };
   const store = {
-    path: defaultAdapterBeadsDir,
+    path: projectRoot ? beadsDirFor(projectRoot) : path.resolve(dir, defaultAdapterBeadsRoot),
     whereDetails: [
       "database: embedded-dolt",
       "status: healthy"

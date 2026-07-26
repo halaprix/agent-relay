@@ -4,7 +4,15 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
-import { defaultAdapterRegistryPath, loadAdapter, syncAdapters, validateAdapter } from "../src/lib/adapter.mjs";
+import {
+  beadsStoreIsTracked,
+  defaultAdapterRegistryPath,
+  loadAdapter,
+  resolveBeadsDir,
+  resolveResourcesRootName,
+  syncAdapters,
+  validateAdapter
+} from "../src/lib/adapter.mjs";
 import { createRepoFixture } from "./helpers.mjs";
 
 test("example adapter validates", async () => {
@@ -35,6 +43,47 @@ test("example adapter routes package tests and Solidity delivery distinctly", as
     "app-package",
     "solidity"
   ]);
+});
+
+test("example adapter keeps the beads store project-local and untracked", async () => {
+  const { adapter } = await loadAdapter("example-app");
+  assert.equal(adapter.beads.requiredDir, ".beads");
+  assert.equal(beadsStoreIsTracked(adapter), false);
+  assert.equal(adapter.controlPlane.protectedPaths.includes(".beads"), true);
+  assert.equal(resolveBeadsDir(adapter, "/tmp/project"), path.join("/tmp/project", ".beads"));
+});
+
+test("resolveBeadsDir keeps absolute stores and rejects escapes", async () => {
+  const { adapter } = await loadAdapter("example-app");
+  const absoluteAdapter = { beads: { requiredDir: "/srv/shared-beads", memoryKey: "key" } };
+  assert.equal(resolveBeadsDir(absoluteAdapter, "/tmp/project"), "/srv/shared-beads");
+  assert.throws(
+    () =>
+      validateAdapter({
+        ...adapter,
+        beads: { ...adapter.beads, requiredDir: "../outside-beads" }
+      }),
+    /must stay inside the project/
+  );
+  assert.throws(
+    () =>
+      validateAdapter({
+        ...adapter,
+        beads: { ...adapter.beads, tracked: "yes" }
+      }),
+    /beads.tracked must be boolean/
+  );
+});
+
+test("resolveResourcesRootName defaults to .resources and honors adapter overrides", async () => {
+  const { adapter } = await loadAdapter("example-app");
+  assert.equal(resolveResourcesRootName(adapter), ".resources");
+  assert.equal(resolveResourcesRootName(null), ".resources");
+  assert.equal(resolveResourcesRootName({ guidance: { resourcesRoot: ".cache/reference" } }), ".cache/reference");
+  assert.throws(
+    () => resolveResourcesRootName({ guidance: { resourcesRoot: "../escape" } }),
+    /relative path inside the project/
+  );
 });
 
 test("syncAdapters --check fails on registry drift", async () => {

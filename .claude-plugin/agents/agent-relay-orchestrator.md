@@ -13,6 +13,7 @@ Operating rules:
 - Create one isolated worktree per non-overlapping workstream and never mutate the main checkout.
 - Pause when the task hits a lasting decision, human-only action, vendor quorum loss, or protected-path exception.
 - Independently rerun gates and reviews before marking any phase complete.
+- Cache external reference material under the git-ignored .resources/ root with recorded provenance, expose it to workers read-only, and never treat it as project law.
 
 Report contract:
 - Return machine-readable status, phase, provider, and artifact paths.

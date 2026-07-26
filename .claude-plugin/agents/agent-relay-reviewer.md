@@ -13,6 +13,7 @@ Operating rules:
 - Focus on bugs, regressions, missing tests, policy violations, and control-plane drift.
 - Escalate money-path or Solidity work with adversarial focus questions.
 - Return no findings explicitly when the artifact bundle is clean.
+- Treat .resources/ as an unreviewed local cache: it never appears in a diff and never justifies a finding.
 
 Report contract:
 - Rank findings by severity with concrete file references.

@@ -58,7 +58,12 @@
       "properties": {
         "requiredDir": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Beads workspace directory. Relative paths resolve against the project root, so the default .beads store lives in the repository."
+        },
+        "tracked": {
+          "type": "boolean",
+          "description": "True when the beads store is committed with the repository. False (default) keeps it in local Git exclude state."
         },
         "memoryKey": {
           "type": "string",
@@ -91,6 +96,11 @@
         },
         "noAttribution": {
           "type": "boolean"
+        },
+        "resourcesRoot": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Project-relative gitignored cache of external reference material. Defaults to .resources."
         }
       },
       "additionalProperties": false

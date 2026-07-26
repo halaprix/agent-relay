@@ -1,7 +1,7 @@
 import path from "node:path";
 import { copyFile, lstat, readdir, readFile, realpath, writeFile, mkdtemp, rename } from "node:fs/promises";
 import os from "node:os";
-import { loadAdapter, syncAdapters } from "./adapter.mjs";
+import { beadsStoreIsTracked, loadAdapter, resolveBeadsDir, resolveResourcesRootName, syncAdapters } from "./adapter.mjs";
 import { appendBeadComment, approvalForSpecHash, rebuildStateFromBeadComments, verifyBeadsStore } from "./beads.mjs";
 import { ensureDir, pathExists, readJson, writeJson, appendJsonl, removePath, listFilesRecursive } from "./fs.mjs";
 import {
@@ -22,10 +22,12 @@ import { acquireLock } from "./lock.mjs";
 import { ok, result } from "./output.mjs";
 import {
   projectConfigPath,
+  projectResourcesRoot,
   projectStateRoot,
   runLedgerPath,
   runStatePath
 } from "./paths.mjs";
+import { RESOURCES_DIR_NAME, SNAPSHOT_IGNORE_PREFIXES } from "./constants.mjs";
 import { classifyProviderFailure, parseWorkerReport, runProviderCommand } from "./provider.mjs";
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
@@ -183,28 +185,76 @@ async function readProjectConfig(projectRoot, adapterName) {
   return readJson(configPath);
 }
 
-async function ensureGitExclude(projectRoot) {
+async function ensureGitExclude(projectRoot, markers) {
   const excludePath = path.join(projectRoot, ".git", "info", "exclude");
   if (!(await pathExists(path.dirname(excludePath)))) {
     return null;
   }
   const current = (await readFile(excludePath, "utf8").catch(() => "")).split("\n");
-  const marker = ".agents/agent-relay/";
-  if (!current.includes(marker)) {
-    const next = `${current.filter(Boolean).join("\n")}${current.length > 1 ? "\n" : ""}${marker}\n`;
+  const missing = markers.filter((marker) => !current.includes(marker));
+  if (missing.length > 0) {
+    const next = `${[...current.filter(Boolean), ...missing].join("\n")}\n`;
     await writeFile(excludePath, next, "utf8");
   }
   return excludePath;
 }
 
-async function ensureProjectState(projectRoot, adapterName) {
+function renderResourcesReadme(resourcesRootName) {
+  return [
+    `# ${resourcesRootName}`,
+    "",
+    "Local, never-committed cache of external reference material for agents working in this project.",
+    "",
+    "Rules:",
+    "",
+    `- \`${resourcesRootName}/\` is ignored by Git. Nothing here is a deliverable and nothing here is reviewed.`,
+    "- Agents read from it. Relay workers receive it read-only; the human or the supervisor writes it.",
+    "- Store one topic per directory with a `SOURCE.md` recording the origin URL and the fetch date.",
+    "- Project law (AGENTS.md, architecture docs, ADRs) always wins over anything cached here.",
+    "- Treat every entry as a possibly stale snapshot; re-fetch instead of editing it in place.",
+    ""
+  ].join("\n");
+}
+
+async function ensureResourcesRoot(projectRoot, resourcesRootName) {
+  const resourcesRoot = projectResourcesRoot(projectRoot, resourcesRootName);
+  await ensureDir(resourcesRoot);
+  const readmePath = path.join(resourcesRoot, "README.md");
+  if (!(await pathExists(readmePath))) {
+    await writeFile(readmePath, renderResourcesReadme(resourcesRootName), "utf8");
+  }
+  return resourcesRoot;
+}
+
+function withProjectBeadsDir(env, adapter, projectRoot) {
+  const beadsDir = resolveBeadsDir(adapter, projectRoot);
+  return { ...env, BEADS_DIR: beadsDir };
+}
+
+function inheritedBeadsDirIgnored(env, beadsDir) {
+  return Boolean(env.BEADS_DIR) && path.resolve(env.BEADS_DIR) !== path.resolve(beadsDir);
+}
+
+function beadsExcludeMarker(adapter) {
+  const requiredDir = adapter?.beads?.requiredDir;
+  if (typeof requiredDir !== "string" || requiredDir === "" || path.isAbsolute(requiredDir) || beadsStoreIsTracked(adapter)) {
+    return null;
+  }
+  return `${requiredDir.replace(/\/+$/, "")}/`;
+}
+
+async function ensureProjectState(projectRoot, adapterName, adapter = null) {
   const stateRoot = projectStateRoot(projectRoot);
   await ensureDir(path.join(stateRoot, "state"));
   await ensureDir(path.join(stateRoot, "artifacts"));
   await ensureDir(path.join(stateRoot, "worktrees"));
   const config = await readProjectConfig(projectRoot, adapterName);
-  const excludePath = await ensureGitExclude(projectRoot);
-  return { config, excludePath, stateRoot };
+  const resourcesRootName = resolveResourcesRootName(adapter);
+  const resourcesRoot = await ensureResourcesRoot(projectRoot, resourcesRootName);
+  const markers = [".agents/agent-relay/", `${resourcesRootName}/`, beadsExcludeMarker(adapter)].filter(Boolean);
+  const excludePath = await ensureGitExclude(projectRoot, markers);
+  const beadsDir = adapter ? resolveBeadsDir(adapter, projectRoot) : null;
+  return { config, excludePath, stateRoot, resourcesRoot, resourcesRootName, beadsDir };
 }
 
 async function syncProjectRoles(projectRoot) {
@@ -500,7 +550,7 @@ async function protectedRuntimeRoots({ projectRoot, config, adapter, writableRoo
     projectRoot,
     config.mainCheckoutRoot || projectRoot,
     writableRoot,
-    adapter.beads.requiredDir,
+    resolveBeadsDir(adapter, projectRoot),
     projectStateRoot(projectRoot)
   ];
   for (const baseRoot of [projectRoot, config.mainCheckoutRoot || projectRoot, writableRoot]) {
@@ -830,8 +880,9 @@ async function prepareIsolatedProviderRun({
 
   let resolvedBeadsDir = null;
   let resolvedBdCommand = null;
-  if (await pathExists(adapter.beads.requiredDir)) {
-    resolvedBeadsDir = await resolvePathForMount(adapter.beads.requiredDir);
+  const projectBeadsDir = resolveBeadsDir(adapter, projectRoot);
+  if (await pathExists(projectBeadsDir)) {
+    resolvedBeadsDir = await resolvePathForMount(projectBeadsDir);
   }
   const bdCandidate = supervisorEnv.AGENT_RELAY_BD_BIN || "bd";
   try {
@@ -844,6 +895,17 @@ async function prepareIsolatedProviderRun({
   }
   if (resolvedBdCommand && !isUnderAnyRoot(resolvedBdCommand, [...mounts.keys()])) {
     mounts.set(resolvedBdCommand, { source: resolvedBdCommand, mode: "ro" });
+  }
+
+  let resolvedResourcesRoot = null;
+  const resourcesRootPath = projectResourcesRoot(projectRoot, resolveResourcesRootName(adapter));
+  if (await pathExists(resourcesRootPath)) {
+    const candidate = await resolvePathForMount(resourcesRootPath);
+    const writableRootReal = (await pathExists(writableRoot)) ? await realpath(writableRoot) : path.resolve(writableRoot);
+    if (!overlapsAnyProtectedRoot(candidate, [writableRootReal])) {
+      resolvedResourcesRoot = candidate;
+      mounts.set(candidate, { source: candidate, mode: "ro" });
+    }
   }
 
   const runtimeRoots = await protectedRuntimeRoots({
@@ -891,6 +953,11 @@ async function prepareIsolatedProviderRun({
     PATH: mirrored.PATH || process.env.PATH || "/usr/bin:/bin",
     ...mirrored
   };
+  if (resolvedResourcesRoot) {
+    env.AGENT_RELAY_RESOURCES_DIR = resolvedResourcesRoot;
+  } else {
+    delete env.AGENT_RELAY_RESOURCES_DIR;
+  }
 
   if (!(await bubblewrapSupported())) {
     delete env.BEADS_DIR;
@@ -1203,7 +1270,7 @@ function mergeRecoveredState({ liveState, recovered, adapter }) {
 async function ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config }) {
   const statePath = runStatePath(projectRoot, beadId);
   const hasLocalState = await pathExists(statePath);
-  const beads = verifyBeadsStore({ adapter, env, beadId, claim: false, alreadyClaimed: true });
+  const beads = verifyBeadsStore({ adapter, env, beadId, beadsDir: resolveBeadsDir(adapter, projectRoot), claim: false, alreadyClaimed: true });
   const livePlan = buildPlanState({
     projectRoot,
     adapterName,
@@ -1244,7 +1311,7 @@ async function ensurePlannedState({ projectRoot, adapterName, beadId, adapter, e
     });
   }
   if (!beads.bead.claimed) {
-    verifyBeadsStore({ adapter, env, beadId, claim: true, alreadyClaimed: false });
+    verifyBeadsStore({ adapter, env, beadId, beadsDir: resolveBeadsDir(adapter, projectRoot), claim: true, alreadyClaimed: false });
   }
   const policy = computeReviewVendorPolicy(adapter, beads.bead.riskClass);
   const state = livePlan;
@@ -1272,7 +1339,7 @@ async function loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, e
   if (await pathExists(localPath)) {
     return ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   }
-  const beads = verifyBeadsStore({ adapter, env, beadId, claim: false, alreadyClaimed: true });
+  const beads = verifyBeadsStore({ adapter, env, beadId, beadsDir: resolveBeadsDir(adapter, projectRoot), claim: false, alreadyClaimed: true });
   const liveState = buildPlanState({
     projectRoot,
     adapterName,
@@ -1306,7 +1373,7 @@ async function createWorktreeIfMissing({ projectRoot, beadId, adapter, config, s
   if (before !== after) {
     throw new Error("main checkout drift detected during worktree creation");
   }
-  const snapshot = await captureSnapshot(worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
+  const snapshot = await captureSnapshot(worktreePath, { ignorePrefixes: SNAPSHOT_IGNORE_PREFIXES });
   const snapshotPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, "setup-snapshot.json");
   await ensureDir(path.dirname(snapshotPath));
   await writeJson(snapshotPath, snapshot);
@@ -1366,7 +1433,7 @@ async function withBeadLock({ projectRoot, beadId, action }, fn) {
   }
 }
 
-function buildCoderPrompt({ state, gateGroupNames, corrective, reason }) {
+function buildCoderPrompt({ state, gateGroupNames, corrective, reason, resourcesRootName = RESOURCES_DIR_NAME }) {
   const issue = state.issue;
   const lines = [
     `Bead: ${issue.id}`,
@@ -1380,7 +1447,8 @@ function buildCoderPrompt({ state, gateGroupNames, corrective, reason }) {
     `Gate groups: ${gateGroupNames.length > 0 ? gateGroupNames.join(", ") : "none"}`,
     "Output schema: JSON object with required status, summary, ownedPaths, commandsAttempted, changedPaths, and optional gatesClaimed, artifacts.",
     "Worker constraints: when BEADS_DIR is available it is mounted read-only; if you inspect Beads, use `bd --readonly ...`. Under fallback containment BEADS_DIR may be unavailable. Do not write Beads, Git, remotes, or PRs.",
-    "Do not read or modify files outside the assigned worktree."
+    `Reference cache: when AGENT_RELAY_RESOURCES_DIR is set it points at the project's read-only ${resourcesRootName}/ cache of external documentation. Read it for context only; it is never project law and never a deliverable.`,
+    "Do not read or modify files outside the assigned worktree and that read-only reference cache."
   ];
   if (corrective) {
     lines.push(`Corrective context: ${sanitizePromptText(reason, { maxLength: 3000 })}`);
@@ -1651,7 +1719,7 @@ async function ensurePlanReady({ projectRoot, beadId, state, config, adapter, en
     });
   }
   if (nextState.planReview.approvalRequired) {
-    const beads = verifyBeadsStore({ adapter, env, beadId, claim: false, alreadyClaimed: true });
+    const beads = verifyBeadsStore({ adapter, env, beadId, beadsDir: resolveBeadsDir(adapter, projectRoot), claim: false, alreadyClaimed: true });
     const approval = approvalForSpecHash(beads.comments, nextState.specHash);
     if (!approval || approval.approved !== true) {
       const paused = await writeState(projectRoot, beadId, {
@@ -1721,7 +1789,8 @@ async function executeCoder({ projectRoot, beadId, state, config, adapter, env }
           state,
           gateGroupNames,
           corrective: Boolean(correctiveReason),
-          reason: correctiveReason
+          reason: correctiveReason,
+          resourcesRootName: resolveResourcesRootName(adapter)
         })
       });
       const run = await runCommandChecked({
@@ -1968,7 +2037,7 @@ async function runReviewer({ projectRoot, beadId, state, config, adapter, env })
   }
   const findings = [];
   for (const { providerName, providerConfig, vendor } of candidates) {
-    const beforeSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
+    const beforeSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: SNAPSHOT_IGNORE_PREFIXES });
     const isolated = await prepareIsolatedProviderRun({
       projectRoot,
       adapter,
@@ -2010,7 +2079,7 @@ async function runReviewer({ projectRoot, beadId, state, config, adapter, env })
     if (run.code !== 0) {
       continue;
     }
-    const afterSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: [".git", ".agents/agent-relay", ".agent-relay-sandbox"] });
+    const afterSnapshot = await captureSnapshot(state.worktreePath, { ignorePrefixes: SNAPSHOT_IGNORE_PREFIXES });
     if (sha256Json(beforeSnapshot) !== sha256Json(afterSnapshot)) {
       throw new Error(`reviewer mutated worktree contents during ${providerName}`);
     }
@@ -2232,9 +2301,9 @@ async function deliverReviewedWork({ projectRoot, beadId, state, config, adapter
   return ok("review", { state: nextState, prUrl });
 }
 
-export async function doctor({ projectRoot, adapterName = "example-app" }) {
+export async function doctor({ projectRoot, adapterName = "example-app", env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
-  const { config, excludePath } = await ensureProjectState(projectRoot, adapterName);
+  const { config, excludePath, resourcesRoot, beadsDir } = await ensureProjectState(projectRoot, adapterName, adapter);
   const roles = await syncRoleBundles({ check: true });
   const adapters = await syncAdapters({ check: true });
   const problems = [];
@@ -2243,20 +2312,53 @@ export async function doctor({ projectRoot, adapterName = "example-app" }) {
       problems.push(`missing required guidance file: ${requiredFile}`);
     }
   }
+  const beadsStorePresent = await pathExists(beadsDir);
+  if (!beadsStorePresent) {
+    problems.push(`missing beads store at ${beadsDir}: run \`bd init --quiet\` in the project root`);
+  }
+  const details = {
+    adapter: adapter.name,
+    config,
+    excludePath,
+    resourcesRoot,
+    resourcesIgnored: await resourcesRootIsIgnored(projectRoot, excludePath, resolveResourcesRootName(adapter)),
+    beadsDir,
+    beadsStorePresent,
+    beadsTracked: beadsStoreIsTracked(adapter),
+    inheritedBeadsDirIgnored: inheritedBeadsDirIgnored(env, beadsDir),
+    roles: roles.length,
+    adapters: adapters.length
+  };
   return problems.length > 0
-    ? result("project-misconfigured", "doctor", { problems, adapter: adapter.name, config, excludePath, roles: roles.length, adapters: adapters.length })
-    : ok("doctor", { adapter: adapter.name, config, excludePath, roles: roles.length, adapters: adapters.length });
+    ? result("project-misconfigured", "doctor", { problems, ...details })
+    : ok("doctor", details);
+}
+
+async function resourcesRootIsIgnored(projectRoot, excludePath, resourcesRootName) {
+  const marker = `${resourcesRootName}/`;
+  const sources = [excludePath, path.join(projectRoot, ".gitignore")].filter(Boolean);
+  for (const source of sources) {
+    const lines = (await readFile(source, "utf8").catch(() => "")).split("\n").map((line) => line.trim());
+    if (lines.includes(marker) || lines.includes(resourcesRootName)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function setup({ projectRoot, adapterName }) {
   const { adapter } = await loadAdapter(adapterName);
-  const { config, excludePath } = await ensureProjectState(projectRoot, adapterName);
+  const { config, excludePath, resourcesRoot, beadsDir } = await ensureProjectState(projectRoot, adapterName, adapter);
   const syncedRoles = await syncProjectRoles(projectRoot);
   return ok("setup", {
     adapter: adapter.name,
     config,
     configPath: projectConfigPath(projectRoot),
     excludePath,
+    resourcesRoot,
+    beadsDir,
+    beadsTracked: beadsStoreIsTracked(adapter),
+    beadsStorePresent: await pathExists(beadsDir),
     syncedRoles,
     localStateRoot: projectStateRoot(projectRoot)
   });
@@ -2264,7 +2366,8 @@ export async function setup({ projectRoot, adapterName }) {
 
 async function planUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName);
+  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
+  env = withProjectBeadsDir(env, adapter, projectRoot);
   const state = await ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   return ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "plan" });
 }
@@ -2296,7 +2399,8 @@ export async function status({ projectRoot, beadId }) {
 
 async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName);
+  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
+  env = withProjectBeadsDir(env, adapter, projectRoot);
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "run" });
   if (!planReady.ok) {
@@ -2309,7 +2413,8 @@ async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env
 
 async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName);
+  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
+  env = withProjectBeadsDir(env, adapter, projectRoot);
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   if (!state.latestDiffArtifact) {
     return result("human-action-required", "review", {
@@ -2391,7 +2496,8 @@ async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.
 
 export async function gates({ projectRoot, adapterName, beadId, gateName, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName);
+  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
+  env = withProjectBeadsDir(env, adapter, projectRoot);
   const state = beadId
     ? await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config })
     : { worktreePath: projectRoot };
@@ -2410,7 +2516,8 @@ export async function gates({ projectRoot, adapterName, beadId, gateName, env = 
 
 async function resumeUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
   const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName);
+  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
+  env = withProjectBeadsDir(env, adapter, projectRoot);
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "resume" });
   if (!planReady.ok) {

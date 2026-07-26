@@ -7,3 +7,4 @@ dist/
 .generated/
 test-output/
 site/.cache/
+.resources/

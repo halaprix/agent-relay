@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadAdapter } from "../src/lib/adapter.mjs";
 import { acquireLock } from "../src/lib/lock.mjs";
@@ -32,7 +32,6 @@ import {
   createFakeGitStore,
   createFakeProviderStore,
   createProjectFixture,
-  defaultAdapterBeadsDir,
   seedRelayConfig,
   writeState
 } from "./helpers.mjs";
@@ -47,7 +46,6 @@ test.after(() => {
 
 function relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra = {} }) {
   return {
-    BEADS_DIR: defaultAdapterBeadsDir,
     AGENT_RELAY_BD_BIN: repoPath("test", "fixtures", "fake-bd.mjs"),
     FAKE_BD_STORE: bdStorePath,
     FAKE_GATE_STORE: gateStorePath,
@@ -179,16 +177,94 @@ test("setup writes local state, syncs roles, and marks .agents/agent-relay ignor
   assert.equal(claudeLaw.trim(), "# Fixture CLAUDE");
 });
 
+test("setup creates the ignored reference cache and the project-local beads exclude entry", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const result = await setup({ projectRoot, adapterName: "example-app" });
+  assert.equal(result.ok, true);
+  assert.equal(result.resourcesRoot, path.join(projectRoot, ".resources"));
+  assert.equal(result.beadsDir, path.join(projectRoot, ".beads"));
+  assert.equal(result.beadsTracked, false);
+  const cacheReadme = await readFile(path.join(projectRoot, ".resources", "README.md"), "utf8");
+  assert.match(cacheReadme, /never-committed cache/);
+  assert.match(cacheReadme, /SOURCE\.md/);
+  const exclude = await readFile(path.join(projectRoot, ".git", "info", "exclude"), "utf8");
+  assert.match(exclude, /^\.resources\/$/m);
+  assert.match(exclude, /^\.beads\/$/m);
+
+  await mkdir(path.join(projectRoot, ".resources", "beads"), { recursive: true });
+  await writeFile(path.join(projectRoot, ".resources", "beads", "SOURCE.md"), "cached\n", "utf8");
+  const rerun = await setup({ projectRoot, adapterName: "example-app" });
+  assert.equal(rerun.ok, true);
+  const excludeAfter = await readFile(path.join(projectRoot, ".git", "info", "exclude"), "utf8");
+  assert.equal(excludeAfter.split("\n").filter((line) => line === ".resources/").length, 1);
+  assert.equal(await readFile(path.join(projectRoot, ".resources", "beads", "SOURCE.md"), "utf8"), "cached\n");
+});
+
 test("doctor honors the requested adapter and validates required files", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
-  const result = await doctor({ projectRoot, adapterName: "example-app" });
+  const result = await doctor({ projectRoot, adapterName: "example-app", env: {} });
   assert.equal(result.ok, true);
   assert.equal(result.adapter, "example-app");
+  assert.equal(result.beadsDir, path.join(projectRoot, ".beads"));
+  assert.equal(result.beadsStorePresent, true);
+  assert.equal(result.resourcesIgnored, true);
+  assert.equal(result.inheritedBeadsDirIgnored, false);
+});
+
+test("doctor reports a missing project-local beads store and an ignored global BEADS_DIR", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  await rm(path.join(projectRoot, ".beads"), { recursive: true, force: true });
+  const result = await doctor({
+    projectRoot,
+    adapterName: "example-app",
+    env: { BEADS_DIR: "/home/someone/.global-beads" }
+  });
+  assert.equal(result.exitClass, "project-misconfigured");
+  assert.equal(result.problems.some((problem) => /missing beads store/.test(problem)), true);
+  assert.equal(result.problems.some((problem) => /bd init --quiet/.test(problem)), true);
+  assert.equal(result.inheritedBeadsDirIgnored, true);
+});
+
+test("isolated provider runs mount the project reference cache read-only", { timeout: 10000 }, async (t) => {
+  __setBubblewrapSupportForTests(true);
+  t.after(() => __resetBubblewrapSupportForTests());
+  const projectRoot = await createProjectFixture();
+  const worktreeRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-isolated-worktree-"));
+  const gitStorePath = await createFakeGitStore(projectRoot);
+  const shimDir = await createGateShimPath();
+  const providerStorePath = await createFakeProviderStore([]);
+  const { adapter } = await loadAdapter("example-app");
+  await setup({ projectRoot, adapterName: "example-app" });
+  await mkdir(path.join(projectRoot, ".resources", "beads"), { recursive: true });
+  await writeFile(path.join(projectRoot, ".resources", "beads", "SOURCE.md"), "cached reference\n", "utf8");
+
+  const isolated = await __prepareIsolatedProviderRunForTests({
+    projectRoot,
+    adapter,
+    config: baseConfig(projectRoot, gitStorePath),
+    supervisorEnv: relayEnv({ gitStorePath }),
+    providerConfig: fakeProviderConfig({ storePath: providerStorePath, shimDir, vendor: "anthropic" }),
+    beadId: "example-app-123",
+    providerName: "claude",
+    cwd: worktreeRoot,
+    writableRoot: worktreeRoot,
+    promptContents: "test prompt"
+  });
+
+  const resourcesRoot = await realpath(path.join(projectRoot, ".resources"));
+  const resourcesMountIndex = indexOfMount(isolated.args, resourcesRoot);
+  assert.notEqual(resourcesMountIndex, -1);
+  assert.equal(isolated.args[resourcesMountIndex], "--ro-bind");
+  assert.equal(isolated.env.AGENT_RELAY_RESOURCES_DIR, resourcesRoot);
+
+  const beadsMountIndex = indexOfMount(isolated.args, await realpath(path.join(projectRoot, ".beads")));
+  assert.notEqual(beadsMountIndex, -1);
+  assert.equal(isolated.args[beadsMountIndex], "--ro-bind");
 });
 
 test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bubblewrap mounts with share-net, readonly blockers, and a writable sandbox HOME", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
-  const bdStorePath = await createFakeBdStore();
+  const bdStorePath = await createFakeBdStore({ projectRoot });
   const requiredBeadsDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-beads-required-"));
   const gitStorePath = await createFakeGitStore(projectRoot);
   const shimDir = await createGateShimPath();
@@ -492,6 +568,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
 test("run creates an isolated worktree and executes the coder there", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -547,12 +624,17 @@ test("run creates an isolated worktree and executes the coder there", { timeout:
   assert.equal(providerStore.calls.length, 1);
   assert.equal(providerStore.calls[0].cwd, result.state.worktreePath);
   assert.match(providerStore.calls[0].prompt, /Gate groups: none/);
+  assert.match(providerStore.calls[0].prompt, /AGENT_RELAY_RESOURCES_DIR/);
+  assert.match(providerStore.calls[0].prompt, /never project law and never a deliverable/);
   assert.doesNotMatch(providerStore.calls[0].prompt, /formatting|solidity/);
 });
 
-test("run strips BEADS_DIR from providers and blocks absolute command and write escapes", { timeout: 10000 }, async () => {
+test("run strips BEADS_DIR from providers and blocks absolute command and write escapes", { timeout: 10000 }, async (t) => {
+  __setBubblewrapSupportForTests(false);
+  t.after(() => __resetBubblewrapSupportForTests());
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -627,6 +709,7 @@ test("run strips BEADS_DIR from providers and blocks absolute command and write 
 test("run retries service failure once, corrects on needs-fix with the same provider, and preserves partial edits across handoff", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -705,6 +788,7 @@ test("run retries service failure once, corrects on needs-fix with the same prov
 test("run detects worktree setup failure and main-checkout drift", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -761,7 +845,7 @@ test("run detects worktree setup failure and main-checkout drift", { timeout: 10
 
 test("review enforces quorum, resumes from Bead comments without local state, and pauses when delivery is not configured", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
-  const bdStorePath = await createFakeBdStore();
+  const bdStorePath = await createFakeBdStore({ projectRoot });
   const gitStorePath = await createFakeGitStore(projectRoot);
   const gateStorePath = await createFakeGateStore([{ ok: true }, { ok: true }, { ok: true }, { ok: true }, { ok: true }]);
   const shimDir = await createGateShimPath();
@@ -841,7 +925,7 @@ test("review enforces quorum, resumes from Bead comments without local state, an
 
 test("delivery uses neutral team-facing text, parses gh stdout URLs, clears dirty state, and cleanup removes only approved clean worktrees", { timeout: 30000 }, async () => {
   const projectRoot = await createProjectFixture();
-  const bdStorePath = await createFakeBdStore();
+  const bdStorePath = await createFakeBdStore({ projectRoot });
   const gitStorePath = await createFakeGitStore(projectRoot);
   const gateStorePath = await createFakeGateStore([{ ok: true }, { ok: true }, { ok: true }, { ok: true }, { ok: true }]);
   const shimDir = await createGateShimPath();
@@ -931,6 +1015,7 @@ test("delivery uses neutral team-facing text, parses gh stdout URLs, clears dirt
 test("delivery binds the reviewed artifact to the staged index even if the worktree mutates after add", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -1019,6 +1104,7 @@ test("delivery binds the reviewed artifact to the staged index even if the workt
 test("resume reparses metadata.agentRelay JSON and invalidates stale recovered approvals when the spec changes", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -1104,6 +1190,7 @@ test("delivery routing uses default groups for documentation and normal code, an
   async function deliverForRisk(riskClass) {
     const projectRoot = await createProjectFixture();
     const bdStorePath = await createFakeBdStore({
+    projectRoot,
       issues: {
         "example-app-123": {
           id: "example-app-123",
@@ -1190,7 +1277,7 @@ test("delivery routing uses default groups for documentation and normal code, an
 
 test("run does not bypass plan review quorum for non-documentation work", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
-  const bdStorePath = await createFakeBdStore();
+  const bdStorePath = await createFakeBdStore({ projectRoot });
   const gitStorePath = await createFakeGitStore(projectRoot);
   const gateStorePath = await createFakeGateStore([]);
   const shimDir = await createGateShimPath();
@@ -1231,6 +1318,7 @@ test("run does not bypass plan review quorum for non-documentation work", { time
 test("review vendor independence rejects same-vendor aliases as independent reviewers", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -1292,6 +1380,7 @@ test("review vendor independence rejects same-vendor aliases as independent revi
 test("high-risk plans require matching approval comments and resume advances on the correct specHash", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -1375,6 +1464,7 @@ test("high-risk plans require matching approval comments and resume advances on 
 test("review corrections return to the same coder and include consolidated findings in the next prompt", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -1471,6 +1561,7 @@ test("review corrections return to the same coder and include consolidated findi
 test("run fails closed when the coder mutates the worktree branch", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",
@@ -1597,6 +1688,7 @@ test("run and resume reject a fresh concurrent bead lock", { timeout: 10000 }, a
 test("review fails closed when a reviewer mutates a real git worktree", { timeout: 15000 }, async () => {
   const { projectRoot } = await createRealGitProjectFixture();
   const bdStorePath = await createFakeBdStore({
+    projectRoot,
     issues: {
       "example-app-123": {
         id: "example-app-123",

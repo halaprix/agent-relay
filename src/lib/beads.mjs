@@ -54,10 +54,15 @@ export function parseBdWhereOutput(output) {
   };
 }
 
-function assertBeadsEnv(adapter, env) {
-  if (env.BEADS_DIR !== adapter.beads.requiredDir) {
-    throw new Error(`BEADS_DIR must be ${adapter.beads.requiredDir}`);
-  }
+function beadsEnv(env, beadsDir) {
+  return { ...env, BEADS_DIR: beadsDir };
+}
+
+export function storePathMatches(resolvedPath, beadsDir) {
+  const normalizedStore = path.resolve(beadsDir);
+  const normalizedResolved = path.resolve(resolvedPath);
+  const relative = path.relative(normalizedStore, normalizedResolved);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function assertDependenciesResolved(issue) {
@@ -110,15 +115,16 @@ export function planReviewsForSpecHash(comments, specHash) {
   return extractPlanReviewComments(comments).filter((comment) => comment.specHash === specHash);
 }
 
-export function verifyBeadsStore({ adapter, env, beadId, claim = true, alreadyClaimed = false }) {
-  assertBeadsEnv(adapter, env);
+export function verifyBeadsStore({ adapter, env, beadId, beadsDir, claim = true, alreadyClaimed = false }) {
+  const storeDir = beadsDir || adapter.beads.requiredDir;
+  env = beadsEnv(env, storeDir);
   const where = runBd(["where"], env);
   if (where.status !== 0) {
     throw new Error(`bd where failed: ${where.stderr || where.stdout}`);
   }
   const resolved = parseBdWhereOutput(where.stdout).path;
-  if (resolved !== adapter.beads.requiredDir) {
-    throw new Error(`wrong beads store: expected ${adapter.beads.requiredDir}, received ${resolved}`);
+  if (!storePathMatches(resolved, storeDir)) {
+    throw new Error(`wrong beads store: expected ${storeDir}, received ${resolved}`);
   }
   const prime = runBd(["prime"], env);
   const hasMemoryBody = prime.stdout.includes(adapter.beads.memoryKey);
@@ -164,9 +170,9 @@ export function verifyBeadsStore({ adapter, env, beadId, claim = true, alreadyCl
   };
 }
 
-export function appendBeadComment({ env, beadId, comment }) {
+export function appendBeadComment({ env, beadId, comment, beadsDir = null }) {
   const payload = JSON.stringify(comment);
-  const response = runBd(["comments", "add", beadId, payload, "--json"], env);
+  const response = runBd(["comments", "add", beadId, payload, "--json"], beadsDir ? beadsEnv(env, beadsDir) : env);
   if (response.status !== 0) {
     throw new Error(`bd comments add failed for ${beadId}: ${response.stderr || response.stdout}`);
   }

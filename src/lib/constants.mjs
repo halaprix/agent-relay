@@ -25,6 +25,12 @@ export const ATTRIBUTION_PATTERNS = [
   /ai[- ]generated/i
 ];
 
+export const RESOURCES_DIR_NAME = ".resources";
+
+export const SNAPSHOT_IGNORE_PREFIXES = [".git", ".agents/agent-relay", ".agent-relay-sandbox", RESOURCES_DIR_NAME];
+
+export const REPO_SCAN_IGNORE_DIRS = [".git", "node_modules", RESOURCES_DIR_NAME];
+
 export const ROLE_ORDER = ["orchestrator", "coder", "reviewer"];
 
 export const HOOK_EVENTS = ["PreToolUse", "Stop"];

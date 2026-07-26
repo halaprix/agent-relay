@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { RESOURCES_DIR_NAME } from "./constants.mjs";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(moduleDir, "../..");
@@ -18,6 +19,10 @@ export function runStatePath(projectRoot, beadId) {
 
 export function runLedgerPath(projectRoot, beadId) {
   return path.join(projectStateRoot(projectRoot), "state", `${beadId}.jsonl`);
+}
+
+export function projectResourcesRoot(projectRoot, resourcesRoot = RESOURCES_DIR_NAME) {
+  return path.join(projectRoot, resourcesRoot);
 }
 
 export function projectConfigPath(projectRoot) {
