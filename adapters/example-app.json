@@ -193,7 +193,8 @@
     "orchestratorOrder": [
       "claude",
       "codex",
-      "agy"
+      "agy",
+      "opencode"
     ],
     "capabilities": {
       "claude": {
@@ -213,6 +214,14 @@
         "timeoutMs": 1800000
       },
       "agy": {
+        "roles": [
+          "orchestrator",
+          "coder",
+          "reviewer"
+        ],
+        "timeoutMs": 1800000
+      },
+      "opencode": {
         "roles": [
           "orchestrator",
           "coder",

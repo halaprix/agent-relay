@@ -153,6 +153,44 @@ test("candidateReviewProviders collapses a correctly-resolved model-agnostic pro
   });
 });
 
+// Real opencode-manifest coverage of the same hazard the model-agnostic fixture above
+// exercises abstractly: opencode's model is genuinely operator-configurable via `-m`, so
+// its resolveVendor must both collapse quorum when the resolved vendor matches another
+// provider's declared vendor, and refuse a contradiction rather than silently trusting
+// the declared one.
+test("opencode resolving to anthropic does not inflate quorum alongside claude", () => {
+  const config = {
+    providers: {
+      claude: { command: "claude", vendor: "anthropic", strength: "strong" },
+      opencode: {
+        command: "opencode",
+        args: ["-m", "anthropic/claude-sonnet"],
+        vendor: "anthropic",
+        strength: "strong"
+      }
+    }
+  };
+  const { candidates, hasQuorum } = __candidateReviewProvidersForTests({
+    config,
+    providerNames: ["claude", "opencode"],
+    requiredVendors: 2
+  });
+  assert.equal(candidates.length, 1);
+  assert.equal(hasQuorum, false);
+});
+
+test("opencode declaring openai while its model resolves to anthropic throws the contradiction error", () => {
+  assert.throws(
+    () =>
+      providerVendor("opencode", {
+        command: "opencode",
+        args: ["-m", "anthropic/claude-sonnet"],
+        vendor: "openai"
+      }),
+    new Error("provider opencode declares vendor openai but its configured model resolves to anthropic")
+  );
+});
+
 test("runProviderCommand times out by killing the process group and stops child writes", { timeout: 10000 }, async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-provider-timeout-"));
   const markerPath = path.join(tempDir, "marker.log");
