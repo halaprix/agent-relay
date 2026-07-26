@@ -1,14 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
-import { lstat, mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { repoPath } from "../src/lib/paths.mjs";
 import { validateMarketplaceFile } from "../scripts/validate-marketplaces.mjs";
+import { cleanupFixtures, fixtureDir } from "./helpers.mjs";
+
+test.after(cleanupFixtures);
 
 test("dev install links an executable relay entrypoint", async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), "agent-relay-home-"));
+  const home = await fixtureDir("agent-relay-home-");
   const install = spawnSync(repoPath("scripts", "dev-install.sh"), {
     cwd: repoPath(),
     env: { ...process.env, HOME: home },
@@ -46,7 +48,7 @@ test("marketplace entries resolve to the packaged plugin target", async () => {
 });
 
 test("marketplace validator rejects missing plugin targets", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-marketplace-"));
+  const root = await fixtureDir("agent-relay-marketplace-");
   const pluginRoot = path.join(root, "plugins");
   await mkdir(pluginRoot, { recursive: true });
   await symlink(repoPath(), path.join(pluginRoot, "agent-relay"));

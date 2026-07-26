@@ -1,8 +1,38 @@
 import os from "node:os";
 import path from "node:path";
-import { chmod, cp, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
 import { writeJson } from "../src/lib/fs.mjs";
+
+// Every fixture directory used by the test suite lives under a single
+// session-scoped parent instead of being scattered directly at the tmpdir
+// root. `node --test test/*.test.mjs` runs each test file as its own
+// process, so a lazily-created per-process parent (cleaned up via that
+// file's `test.after` hook) is sufficient to keep tmpdir clean without
+// needing any cross-process coordination.
+let sessionRootPromise = null;
+
+function sessionRoot() {
+  sessionRootPromise ??= mkdtemp(path.join(os.tmpdir(), "agent-relay-session-"));
+  return sessionRootPromise;
+}
+
+// Allocate a uniquely-named fixture directory inside this process's session
+// parent. `prefix` behaves exactly like the prefix argument to `mkdtemp`.
+export async function fixtureDir(prefix) {
+  const root = await sessionRoot();
+  return mkdtemp(path.join(root, prefix));
+}
+
+// Recursively remove this process's session parent, if one was created.
+// Call from a `test.after` hook in every test file that (directly or
+// transitively, via a helper above) allocates a fixture.
+export async function cleanupFixtures() {
+  if (!sessionRootPromise) return;
+  const root = await sessionRootPromise;
+  sessionRootPromise = null;
+  await rm(root, { recursive: true, force: true });
+}
 
 export const defaultAdapterBeadsRoot = JSON.parse(
   await readFile(repoPath("adapters", "example-app.json"), "utf8")
@@ -13,7 +43,7 @@ export function beadsDirFor(projectRoot) {
 }
 
 export async function createRepoFixture({ exclude = [] } = {}) {
-  const fixtureRoot = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-repo-")), "repo");
+  const fixtureRoot = path.join(await fixtureDir("agent-relay-repo-"), "repo");
   const excluded = new Set([".git", "node_modules", ...exclude]);
   await cp(repoPath(), fixtureRoot, {
     recursive: true,
@@ -28,7 +58,7 @@ export async function createRepoFixture({ exclude = [] } = {}) {
 }
 
 export async function createProjectFixture() {
-  const projectRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-project-"));
+  const projectRoot = await fixtureDir("agent-relay-project-");
   await cp(repoPath("test", "fixtures", "project-template"), projectRoot, { recursive: true });
   await mkdir(path.join(projectRoot, ".git", "info"), { recursive: true });
   await writeFile(path.join(projectRoot, ".git", "info", "exclude"), "", "utf8");
@@ -49,7 +79,7 @@ export async function writeState(projectRoot, beadId, state) {
 }
 
 export async function createFakeBdStore({ projectRoot = null, ...overrides } = {}) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-bd-"));
+  const dir = await fixtureDir("agent-relay-bd-");
   const storePath = path.join(dir, "store.json");
   const defaultIssue = {
     id: "example-app-123",
@@ -100,14 +130,14 @@ export async function createFakeBdStore({ projectRoot = null, ...overrides } = {
 }
 
 export async function createGitStatuses(statuses) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-"));
+  const dir = await fixtureDir("agent-relay-git-");
   const filePath = path.join(dir, "statuses.json");
   await writeJson(filePath, { statuses });
   return filePath;
 }
 
 export async function createFakeGitStore(projectRoot, overrides = {}) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-fake-git-"));
+  const dir = await fixtureDir("agent-relay-fake-git-");
   const filePath = path.join(dir, "git-store.json");
   await writeJson(filePath, {
     projectRoot,
@@ -131,7 +161,7 @@ export async function createFakeGitStore(projectRoot, overrides = {}) {
 }
 
 export async function createFakeProviderStore(steps) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-provider-"));
+  const dir = await fixtureDir("agent-relay-provider-");
   const filePath = path.join(dir, "provider-store.json");
   await writeJson(filePath, {
     calls: [],
@@ -141,7 +171,7 @@ export async function createFakeProviderStore(steps) {
 }
 
 export async function createFakeGhStore(overrides = {}) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-gh-"));
+  const dir = await fixtureDir("agent-relay-gh-");
   const filePath = path.join(dir, "gh-store.json");
   await writeJson(filePath, {
     prs: [],
@@ -152,7 +182,7 @@ export async function createFakeGhStore(overrides = {}) {
 }
 
 export async function createFakeGateStore(steps) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-gate-"));
+  const dir = await fixtureDir("agent-relay-gate-");
   const filePath = path.join(dir, "gate-store.json");
   await writeJson(filePath, { steps });
   return filePath;

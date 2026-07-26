@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
-import { mkdtemp } from "node:fs/promises";
 import { assertCommandsAllowed, assertOwnedPaths, scanPrivacy } from "../src/lib/guardrails.mjs";
-import { createTextFile } from "./helpers.mjs";
+import { cleanupFixtures, createTextFile, fixtureDir } from "./helpers.mjs";
+
+test.after(cleanupFixtures);
 
 test("guardrails reject protected git mutation commands", () => {
   assert.throws(() => assertCommandsAllowed(["git add ."]), /forbidden worker command/);
@@ -23,7 +23,7 @@ test("guardrails reject writes outside owned paths", () => {
 });
 
 test("privacy scan skips local data stores it does not author", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-privacy-resources-"));
+  const dir = await fixtureDir("agent-relay-privacy-resources-");
   const generated = ["Generated", " with ", "Codex"].join("");
   const actorEmail = ["actor", "@", "users.noreply.github.com"].join("");
   await createTextFile(path.join(dir, ".resources", "beads", "upstream.md"), generated);
@@ -35,7 +35,7 @@ test("privacy scan skips local data stores it does not author", async () => {
 });
 
 test("privacy scan allows git transport and rejects personal emails", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-privacy-"));
+  const dir = await fixtureDir("agent-relay-privacy-");
   const transport = ["git", "@", "github.com:example-org/agent-relay.git (fetch)"].join("");
   const generated = ["Generated", " with ", "Codex"].join("");
   const personalEmail = ["person", "@", "example.net"].join("");

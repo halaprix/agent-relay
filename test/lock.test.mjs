@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { acquireLock } from "../src/lib/lock.mjs";
+import { cleanupFixtures, fixtureDir } from "./helpers.mjs";
+
+test.after(cleanupFixtures);
 
 const lockModuleUrl = new URL("../src/lib/lock.mjs", import.meta.url).href;
 const contenderScript = `
@@ -75,7 +77,7 @@ async function waitForExit(child) {
 }
 
 test("acquireLock keeps the kernel lock after the flock helper exits, then releases for reacquire", { timeout: 10000 }, async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
+  const root = await fixtureDir("agent-relay-lock-");
   const lockPath = path.join(root, "locks", "bead.lock.json");
   await mkdir(path.dirname(lockPath), { recursive: true });
 
@@ -104,7 +106,7 @@ test("acquireLock keeps the kernel lock after the flock helper exits, then relea
 });
 
 test("kernel flock yields exactly one multi-process owner across 24 contenders", { timeout: 15000 }, async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
+  const root = await fixtureDir("agent-relay-lock-");
   const lockPath = path.join(root, "locks", "bead.lock.json");
   const startSignalPath = path.join(root, "start.signal");
   const releaseSignalPath = path.join(root, "release.signal");
@@ -126,7 +128,7 @@ test("kernel flock yields exactly one multi-process owner across 24 contenders",
 });
 
 test("kernel flock releases on holder crash and allows reacquire", { timeout: 15000 }, async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-relay-lock-"));
+  const root = await fixtureDir("agent-relay-lock-");
   const lockPath = path.join(root, "locks", "bead.lock.json");
   const startSignalPath = path.join(root, "start.signal");
   const releaseSignalPath = path.join(root, "release.signal");

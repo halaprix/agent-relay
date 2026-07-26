@@ -14,7 +14,9 @@ import {
   syncAdapters,
   validateAdapter
 } from "../src/lib/adapter.mjs";
-import { createRepoFixture } from "./helpers.mjs";
+import { cleanupFixtures, createRepoFixture } from "./helpers.mjs";
+
+test.after(cleanupFixtures);
 
 test("example adapter validates", async () => {
   const { adapter } = await loadAdapter("example-app");

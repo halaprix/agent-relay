@@ -1,9 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import {
   buildScopeLockedDiffArtifact,
@@ -11,9 +10,11 @@ import {
   captureSnapshot,
   stageExplicitPaths
 } from "../src/lib/git.mjs";
-import { createProjectFixture } from "./helpers.mjs";
+import { cleanupFixtures, createProjectFixture, fixtureDir } from "./helpers.mjs";
 
 const execFile = promisify(execFileCallback);
+
+test.after(cleanupFixtures);
 
 async function runGitCommand(cwd, args) {
   await execFile("git", args, { cwd });
@@ -53,7 +54,7 @@ test("canonical diff artifacts preserve exact bytes, deletions, executable mode,
   await chmod(path.join(projectRoot, "src", "mode.sh"), 0o755);
   await symlink("binary.bin", path.join(projectRoot, "src", "binary-link"));
 
-  const worktreeArtifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-artifact-")), "worktree.json");
+  const worktreeArtifactPath = path.join(await fixtureDir("agent-relay-git-artifact-"), "worktree.json");
   const { changedPaths } = await buildScopeLockedDiffArtifact({
     worktreePath: projectRoot,
     beforeSnapshot,
@@ -67,7 +68,7 @@ test("canonical diff artifacts preserve exact bytes, deletions, executable mode,
   ]);
 
   await stageExplicitPaths(gitConfig, projectRoot, changedPaths);
-  const stagedArtifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-stage-")), "staged.json");
+  const stagedArtifactPath = path.join(await fixtureDir("agent-relay-git-stage-"), "staged.json");
   await buildStagedDiffArtifact({
     config: gitConfig,
     worktreePath: projectRoot,
@@ -89,7 +90,7 @@ test("canonical diff artifacts preserve exact bytes, deletions, executable mode,
   assert.equal(records.get("src/binary-link").symlinkTarget, "binary.bin");
 
   await writeFile(path.join(projectRoot, "src", "binary.bin"), Buffer.from([0x81]));
-  const driftedArtifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-drift-")), "worktree.json");
+  const driftedArtifactPath = path.join(await fixtureDir("agent-relay-git-drift-"), "worktree.json");
   await buildScopeLockedDiffArtifact({
     worktreePath: projectRoot,
     beforeSnapshot,
@@ -114,7 +115,7 @@ test("scope-locked diffs ignore the reference cache and relay state", { timeout:
   await writeFile(path.join(projectRoot, ".resources", "beads", "upstream.md"), "cached docs\n", "utf8");
   await writeFile(path.join(projectRoot, "src", "base.txt"), "changed\n", "utf8");
 
-  const artifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-resources-")), "worktree.json");
+  const artifactPath = path.join(await fixtureDir("agent-relay-git-resources-"), "worktree.json");
   const { changedPaths } = await buildScopeLockedDiffArtifact({
     worktreePath: projectRoot,
     beforeSnapshot,
@@ -141,7 +142,7 @@ test("broken symlinks remain symlinks in reviewed and staged artifacts", { timeo
   const beforeSnapshot = await captureSnapshot(projectRoot, { ignorePrefixes: [".git"] });
   await symlink("missing-target.txt", path.join(projectRoot, "src", "broken-link"));
 
-  const worktreeArtifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-broken-link-")), "worktree.json");
+  const worktreeArtifactPath = path.join(await fixtureDir("agent-relay-broken-link-"), "worktree.json");
   const { changedPaths } = await buildScopeLockedDiffArtifact({
     worktreePath: projectRoot,
     beforeSnapshot,
@@ -150,7 +151,7 @@ test("broken symlinks remain symlinks in reviewed and staged artifacts", { timeo
   assert.deepEqual(changedPaths, ["src/broken-link"]);
 
   await stageExplicitPaths(gitConfig, projectRoot, changedPaths);
-  const stagedArtifactPath = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-broken-stage-")), "staged.json");
+  const stagedArtifactPath = path.join(await fixtureDir("agent-relay-broken-stage-"), "staged.json");
   await buildStagedDiffArtifact({
     config: gitConfig,
     worktreePath: projectRoot,

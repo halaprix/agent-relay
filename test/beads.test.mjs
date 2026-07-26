@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { epicIdFor, listBeadChildren, storePathMatches, verifyBeadsStore } from "../src/lib/beads.mjs";
 import { loadAdapter } from "../src/lib/adapter.mjs";
-import { beadsDirFor, createFakeBdStore } from "./helpers.mjs";
+import { beadsDirFor, cleanupFixtures, createFakeBdStore } from "./helpers.mjs";
 import { repoPath } from "../src/lib/paths.mjs";
+
+test.after(cleanupFixtures);
 
 const projectRoot = "/tmp/agent-relay-beads-fixture-project";
 const projectBeadsDir = beadsDirFor(projectRoot);

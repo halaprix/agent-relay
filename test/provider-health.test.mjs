@@ -1,8 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import {
   evaluateProvider,
   loadProviderHealth,
@@ -10,6 +9,9 @@ import {
   recordProviderSample
 } from "../src/lib/provider-health.mjs";
 import { writeJson } from "../src/lib/fs.mjs";
+import { cleanupFixtures, fixtureDir } from "./helpers.mjs";
+
+test.after(cleanupFixtures);
 
 const NOW = "2026-01-01T12:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -19,7 +21,7 @@ function isoAt(offsetMs) {
 }
 
 async function createProjectRoot() {
-  return mkdtemp(path.join(os.tmpdir(), "agent-relay-provider-health-"));
+  return fixtureDir("agent-relay-provider-health-");
 }
 
 // Shared by the crossing-handoffAt and advancing-past-cooldown tests below: 3

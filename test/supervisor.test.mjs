@@ -1,9 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadAdapter } from "../src/lib/adapter.mjs";
 import { acquireLock } from "../src/lib/lock.mjs";
@@ -26,6 +25,7 @@ import {
   status
 } from "../src/lib/supervisor.mjs";
 import {
+  cleanupFixtures,
   createCommandShim,
   createFakeBdStore,
   createFakeGateStore,
@@ -33,6 +33,7 @@ import {
   createFakeGitStore,
   createFakeProviderStore,
   createProjectFixture,
+  fixtureDir,
   seedRelayConfig,
   writeState
 } from "./helpers.mjs";
@@ -44,6 +45,7 @@ test.after(() => {
   __resetTestIsolationRunnerForTests();
   __resetBubblewrapSupportForTests();
 });
+test.after(cleanupFixtures);
 
 function relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra = {} }) {
   return {
@@ -58,7 +60,7 @@ function relayEnv({ bdStorePath, gateStorePath, gitStorePath, ghStorePath, extra
 }
 
 async function createGateShimPath() {
-  const shimDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-shims-"));
+  const shimDir = await fixtureDir("agent-relay-shims-");
   await createCommandShim(
     shimDir,
     "pnpm",
@@ -160,7 +162,7 @@ async function createRealGitProjectFixture() {
   await runGitCommand(projectRoot, ["config", "user.email", "relay-tester@example.com"]);
   await runGitCommand(projectRoot, ["add", "."]);
   await runGitCommand(projectRoot, ["commit", "-m", "fixture"]);
-  const remoteRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-remote-"));
+  const remoteRoot = await fixtureDir("agent-relay-remote-");
   await runGitCommand(remoteRoot, ["init", "--bare"]);
   await runGitCommand(projectRoot, ["remote", "add", "origin", remoteRoot]);
   await runGitCommand(projectRoot, ["push", "-u", "origin", "dev"]);
@@ -289,7 +291,7 @@ test("isolated provider runs mount the project reference cache read-only", { tim
   __setBubblewrapSupportForTests(true);
   t.after(() => __resetBubblewrapSupportForTests());
   const projectRoot = await createProjectFixture();
-  const worktreeRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-isolated-worktree-"));
+  const worktreeRoot = await fixtureDir("agent-relay-isolated-worktree-");
   const gitStorePath = await createFakeGitStore(projectRoot);
   const shimDir = await createGateShimPath();
   const providerStorePath = await createFakeProviderStore([]);
@@ -325,7 +327,7 @@ test("isolated provider runs mount the project reference cache read-only", { tim
 test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bubblewrap mounts with share-net, readonly blockers, and a writable sandbox HOME", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({ projectRoot });
-  const requiredBeadsDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-beads-required-"));
+  const requiredBeadsDir = await fixtureDir("agent-relay-beads-required-");
   const gitStorePath = await createFakeGitStore(projectRoot);
   const shimDir = await createGateShimPath();
   const providerStorePath = await createFakeProviderStore([]);
@@ -339,7 +341,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
   };
   const config = baseConfig(projectRoot, gitStorePath);
   const supervisorEnv = relayEnv({ bdStorePath, gitStorePath, extra: { BEADS_DIR: requiredBeadsDir } });
-  const reviewArtifactSource = path.join(await mkdtemp(path.join(os.tmpdir(), "agent-relay-review-artifact-")), "reviewed.json");
+  const reviewArtifactSource = path.join(await fixtureDir("agent-relay-review-artifact-"), "reviewed.json");
   await writeFile(reviewArtifactSource, '{"artifact":true}\n', "utf8");
 
   await assert.rejects(
@@ -529,7 +531,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       /cannot overlap protected project, worktree, Beads, or control-plane paths/
     );
 
-    const dotDotRuntimeAncestor = await mkdtemp(path.join(os.tmpdir(), "agent-relay-dotdot-runtime-"));
+    const dotDotRuntimeAncestor = await fixtureDir("agent-relay-dotdot-runtime-");
     const dotDotRuntimeRoot = path.join(dotDotRuntimeAncestor, "protected-root");
     const dotDotRuntimeChild = path.join(dotDotRuntimeRoot, "..runtime");
     const dotDotRuntimeSibling = path.join(dotDotRuntimeAncestor, "runtime");
@@ -586,10 +588,10 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
     });
     assert.notEqual(indexOfMount(siblingIsolated.args, dotDotRuntimeSibling), -1);
 
-    const externalGitRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-external-git-"));
+    const externalGitRoot = await fixtureDir("agent-relay-external-git-");
     const externalGitDir = path.join(externalGitRoot, "worktrees", "wt");
     const externalCommonDir = path.join(externalGitRoot, "common");
-    const externalWorktreeRoot = await mkdtemp(path.join(os.tmpdir(), "agent-relay-external-worktree-"));
+    const externalWorktreeRoot = await fixtureDir("agent-relay-external-worktree-");
     await mkdir(externalGitDir, { recursive: true });
     await mkdir(externalCommonDir, { recursive: true });
     await writeFile(path.join(externalGitDir, "commondir"), "../../common\n", "utf8");

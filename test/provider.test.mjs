@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import os from "node:os";
 import path from "node:path";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
 import { classifyProviderFailure, parseWorkerReport, providerVendor, runProviderCommand, validateRuntimeProviderConfig } from "../src/lib/provider.mjs";
 import { PROVIDERS } from "../src/lib/providers/index.mjs";
 import { __candidateReviewProvidersForTests } from "../src/lib/supervisor.mjs";
+import { cleanupFixtures, fixtureDir } from "./helpers.mjs";
+
+test.after(cleanupFixtures);
 
 async function waitForMarkerLines(markerPath, minimumLines, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -192,7 +194,7 @@ test("opencode declaring openai while its model resolves to anthropic throws the
 });
 
 test("runProviderCommand times out by killing the process group and stops child writes", { timeout: 10000 }, async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-provider-timeout-"));
+  const tempDir = await fixtureDir("agent-relay-provider-timeout-");
   const markerPath = path.join(tempDir, "marker.log");
   const result = await runProviderCommand({
     providerName: "timeout-fixture",

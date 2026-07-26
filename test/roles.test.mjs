@@ -13,7 +13,9 @@ import {
   resolveRoleModel
 } from "../src/lib/roles.mjs";
 import { findProvider } from "../src/lib/providers/index.mjs";
-import { createRepoFixture } from "./helpers.mjs";
+import { cleanupFixtures, createRepoFixture } from "./helpers.mjs";
+
+test.after(cleanupFixtures);
 
 test("generated role formats normalize back to the canonical body", async () => {
   const roles = await loadRoleSpecs();
