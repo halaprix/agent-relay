@@ -58,6 +58,25 @@ function beadsEnv(env, beadsDir) {
   return { ...env, BEADS_DIR: beadsDir };
 }
 
+export function epicIdFor(beadId) {
+  const separator = String(beadId || "").indexOf(".");
+  return separator === -1 ? String(beadId || "") : String(beadId).slice(0, separator);
+}
+
+// Null means "could not tell", which is different from "has no children". Enforcement that
+// blocks a run must never act on a guess, so callers treat null as permission to proceed.
+export function listBeadChildren({ env, beadId, beadsDir = null }) {
+  const response = runBd(["list", "--parent", beadId, "--json"], beadsDir ? beadsEnv(env, beadsDir) : env);
+  if (response.status !== 0) {
+    return null;
+  }
+  try {
+    return normalizeBdList(response.stdout).filter((child) => child && child.id);
+  } catch {
+    return null;
+  }
+}
+
 export function storePathMatches(resolvedPath, beadsDir) {
   const normalizedStore = path.resolve(beadsDir);
   const normalizedResolved = path.resolve(resolvedPath);

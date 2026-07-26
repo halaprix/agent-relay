@@ -9,7 +9,14 @@ import {
   resolveResourcesRootName,
   syncAdapters
 } from "./adapter.mjs";
-import { appendBeadComment, approvalForSpecHash, rebuildStateFromBeadComments, verifyBeadsStore } from "./beads.mjs";
+import {
+  appendBeadComment,
+  approvalForSpecHash,
+  epicIdFor,
+  listBeadChildren,
+  rebuildStateFromBeadComments,
+  verifyBeadsStore
+} from "./beads.mjs";
 import { ensureDir, pathExists, readJson, writeJson, appendJsonl, removePath, listFilesRecursive } from "./fs.mjs";
 import {
   buildStagedDiffArtifact,
@@ -231,6 +238,22 @@ async function ensureResourcesRoot(projectRoot, resourcesRootName) {
     await writeFile(readmePath, renderResourcesReadme(resourcesRootName), "utf8");
   }
   return resourcesRoot;
+}
+
+// An epic is scope, not a unit of work, and `bd ready` lists epics next to leaves. Refuse the
+// container before a worktree, a lock, or a provider call exists.
+function rejectContainerBead({ env, adapter, projectRoot, beadId, action }) {
+  const children = listBeadChildren({ env, beadId, beadsDir: resolveBeadsDir(adapter, projectRoot) });
+  if (!children || children.length === 0) {
+    return null;
+  }
+  const claimable = children.filter((child) => child.status !== "closed").map((child) => child.id);
+  const suffix = claimable.length > 0 ? `: ${claimable.join(", ")}` : " (every child is closed)";
+  return result("project-misconfigured", action, {
+    reason: `${beadId} is a container with ${children.length} child bead(s), not a unit of work. Claim a leaf beneath it${suffix}.`,
+    beadId,
+    children: children.map((child) => ({ id: child.id, title: child.title, status: child.status }))
+  });
 }
 
 function withProjectBeadsDir(env, adapter, projectRoot) {
@@ -2367,6 +2390,10 @@ async function planUnlocked({ projectRoot, adapterName, beadId, env = process.en
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
   env = withProjectBeadsDir(env, adapter, projectRoot);
+  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "plan" });
+  if (container) {
+    return container;
+  }
   const state = await ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   return ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "plan" });
 }
@@ -2382,7 +2409,20 @@ export async function status({ projectRoot, beadId }) {
     for (const fileName of files) {
       runs.push(await readJson(path.join(stateDir, fileName)));
     }
-    return ok("status", { runs });
+    // Grouping is presentation, so the dotted id is the right signal here — unlike the
+    // container check, which reads the dependency graph because correctness depends on it.
+    const byEpic = new Map();
+    for (const run of runs) {
+      const epic = epicIdFor(run.beadId || "");
+      if (!byEpic.has(epic)) {
+        byEpic.set(epic, []);
+      }
+      byEpic.get(epic).push(run.beadId || "");
+    }
+    const groups = [...byEpic.entries()]
+      .map(([epic, beadIds]) => ({ epic, beadIds }))
+      .sort((left, right) => left.epic.localeCompare(right.epic));
+    return ok("status", { runs, groups });
   }
   const state = await readJson(runStatePath(projectRoot, beadId));
   const ledgerPath = runLedgerPath(projectRoot, beadId);
@@ -2400,6 +2440,10 @@ async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
   env = withProjectBeadsDir(env, adapter, projectRoot);
+  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "run" });
+  if (container) {
+    return container;
+  }
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "run" });
   if (!planReady.ok) {
@@ -2414,6 +2458,10 @@ async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
   env = withProjectBeadsDir(env, adapter, projectRoot);
+  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "review" });
+  if (container) {
+    return container;
+  }
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   if (!state.latestDiffArtifact) {
     return result("human-action-required", "review", {
@@ -2517,6 +2565,10 @@ async function resumeUnlocked({ projectRoot, adapterName, beadId, env = process.
   const { adapter } = await loadAdapter(adapterName);
   const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
   env = withProjectBeadsDir(env, adapter, projectRoot);
+  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "resume" });
+  if (container) {
+    return container;
+  }
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "resume" });
   if (!planReady.ok) {

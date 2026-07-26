@@ -103,7 +103,7 @@ The Beads store is project-local. `adapter.beads.requiredDir` defaults to `.bead
 Work is addressed hierarchically: `agent-relay-n95` is an epic, `agent-relay-n95.1` a task under it, `agent-relay-n95.1.2` a subtask under that. Three levels is the ceiling; anything deeper is a sign the epic wanted splitting.
 
 - **`bd` mints the identifiers.** `bd create "…" -t epic` returns the hash id, and `bd create "…" --parent <id>` appends the next dotted segment. Never hand-write an id.
-- **Only leaves are claimable.** An epic is a container for scope, not a unit of work. `bd ready` will happily list an epic — pick a leaf underneath it instead. Agent Relay enforces this: `relay plan` and `relay run` refuse an id that has children.
+- **Only leaves are claimable.** An epic is a container for scope, not a unit of work. `bd ready` will happily list an epic — pick a leaf underneath it instead. Agent Relay enforces this: `relay plan`, `relay run`, `relay resume`, and `relay review` refuse an id that has children, and name the open leaves beneath it. Detection reads the dependency graph, not the dotted id, so a project with flat ids behaves exactly as before.
 - **Discovered work becomes a child**, not a sibling. If a task turns up something it cannot absorb, the new bead hangs off the bead that found it, so the epic keeps showing the true remaining scope.
 - **Standalone work keeps a flat id.** A lone task does not need a ceremonial epic above it. Promote it to one when it grows children.
 - Epics close on their children through `--waits-for-gate` (`all-children` by default), so an epic left open is a real signal that something under it is unfinished.

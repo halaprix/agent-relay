@@ -22,7 +22,8 @@ import {
   resume,
   review,
   run,
-  setup
+  setup,
+  status
 } from "../src/lib/supervisor.mjs";
 import {
   createCommandShim,
@@ -198,6 +199,55 @@ test("setup creates the ignored reference cache and the project-local beads excl
   const excludeAfter = await readFile(path.join(projectRoot, ".git", "info", "exclude"), "utf8");
   assert.equal(excludeAfter.split("\n").filter((line) => line === ".resources/").length, 1);
   assert.equal(await readFile(path.join(projectRoot, ".resources", "beads", "SOURCE.md"), "utf8"), "cached\n");
+});
+
+test("run and plan refuse a container bead and name the leaves beneath it", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const gitStorePath = await createFakeGitStore(projectRoot);
+  const bdStorePath = await createFakeBdStore({
+    projectRoot,
+    children: {
+      "example-app-123": [
+        { id: "example-app-123.1", title: "Parse usage", status: "open" },
+        { id: "example-app-123.2", title: "Old slice", status: "closed" }
+      ]
+    }
+  });
+  await seedRelayConfig(projectRoot, baseConfig(projectRoot, gitStorePath));
+  const env = relayEnv({ bdStorePath, gitStorePath });
+
+  for (const [label, invoke] of [["run", run], ["plan", plan]]) {
+    const result = await invoke({ projectRoot, adapterName: "example-app", beadId: "example-app-123", env });
+    assert.equal(result.exitClass, "project-misconfigured", label);
+    assert.match(result.reason, /container/i);
+    assert.match(result.reason, /example-app-123\.1/);
+    // The closed child is listed as history but must not be offered as a target.
+    assert.doesNotMatch(result.reason, /example-app-123\.2/);
+    assert.equal(result.children.length, 2);
+  }
+
+  // A leaf with no children is untouched by the check.
+  const leafChildren = await createFakeBdStore({ projectRoot });
+  const leafResult = await run({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-123",
+    env: relayEnv({ bdStorePath: leafChildren, gitStorePath })
+  });
+  assert.notEqual(leafResult.exitClass, "project-misconfigured");
+});
+
+test("status groups runs under their epic", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  await writeState(projectRoot, "example-app-n95.1", { beadId: "example-app-n95.1", phase: "complete" });
+  await writeState(projectRoot, "example-app-n95.2", { beadId: "example-app-n95.2", phase: "implementing" });
+  await writeState(projectRoot, "example-app-6st", { beadId: "example-app-6st", phase: "planning" });
+
+  const result = await status({ projectRoot });
+  assert.equal(result.runs.length, 3);
+  const groups = Object.fromEntries(result.groups.map((group) => [group.epic, group.beadIds]));
+  assert.deepEqual(groups["example-app-n95"], ["example-app-n95.1", "example-app-n95.2"]);
+  assert.deepEqual(groups["example-app-6st"], ["example-app-6st"]);
 });
 
 test("doctor honors the requested adapter and validates required files", { timeout: 10000 }, async () => {

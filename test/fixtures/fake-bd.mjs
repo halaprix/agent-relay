@@ -37,6 +37,11 @@ if (command === "prime") {
   process.exit(0);
 }
 
+if (command === "list" && args[0] === "--parent") {
+  out(`${JSON.stringify((store.children || {})[args[1]] || [])}\n`);
+  process.exit(0);
+}
+
 if (command === "memories" && args[0] === "--json") {
   out(`${JSON.stringify(store.memories)}\n`);
   process.exit(0);

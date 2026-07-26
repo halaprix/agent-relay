@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { storePathMatches, verifyBeadsStore } from "../src/lib/beads.mjs";
+import { epicIdFor, listBeadChildren, storePathMatches, verifyBeadsStore } from "../src/lib/beads.mjs";
 import { loadAdapter } from "../src/lib/adapter.mjs";
 import { beadsDirFor, createFakeBdStore } from "./helpers.mjs";
 import { repoPath } from "../src/lib/paths.mjs";
@@ -34,6 +34,41 @@ test("verifyBeadsStore validates array-backed Beads payloads, acceptance_criteri
   assert.equal(Array.isArray(result.comments), true);
   assert.equal(result.claim.claimed, true);
 }, { signal: AbortSignal.timeout(5000) });
+
+test("epicIdFor reduces a dotted bead id to its epic", () => {
+  assert.equal(epicIdFor("agent-relay-n95"), "agent-relay-n95");
+  assert.equal(epicIdFor("agent-relay-n95.1"), "agent-relay-n95");
+  assert.equal(epicIdFor("agent-relay-n95.1.2"), "agent-relay-n95");
+  assert.equal(epicIdFor(""), "");
+});
+
+test("listBeadChildren reports children, emptiness, and an unreadable store distinctly", async () => {
+  const storePath = await createFakeBdStore({
+    projectRoot,
+    children: {
+      "example-app-100": [
+        { id: "example-app-100.1", title: "First slice", status: "open" },
+        { id: "example-app-100.2", title: "Second slice", status: "closed" }
+      ]
+    }
+  });
+  const env = {
+    AGENT_RELAY_BD_BIN: repoPath("test", "fixtures", "fake-bd.mjs"),
+    FAKE_BD_STORE: storePath,
+    PATH: process.env.PATH
+  };
+
+  const children = listBeadChildren({ env, beadId: "example-app-100" });
+  assert.deepEqual(children.map((child) => child.id), ["example-app-100.1", "example-app-100.2"]);
+  assert.deepEqual(listBeadChildren({ env, beadId: "example-app-123" }), []);
+
+  // An unreadable store is unknown, not childless: enforcement must not run on a guess.
+  const broken = listBeadChildren({
+    env: { ...env, AGENT_RELAY_BD_BIN: repoPath("test", "fixtures", "does-not-exist.mjs") },
+    beadId: "example-app-100"
+  });
+  assert.equal(broken, null);
+});
 
 test("storePathMatches accepts the embedded database inside the project store", () => {
   assert.equal(storePathMatches(projectBeadsDir, projectBeadsDir), true);
