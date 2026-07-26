@@ -1,7 +1,14 @@
 import path from "node:path";
 import { copyFile, lstat, readdir, readFile, realpath, writeFile, mkdtemp, rename } from "node:fs/promises";
 import os from "node:os";
-import { beadsStoreIsTracked, loadAdapter, resolveBeadsDir, resolveResourcesRootName, syncAdapters } from "./adapter.mjs";
+import {
+  beadsExcludeMarker,
+  beadsStoreIsTracked,
+  loadAdapter,
+  resolveBeadsDir,
+  resolveResourcesRootName,
+  syncAdapters
+} from "./adapter.mjs";
 import { appendBeadComment, approvalForSpecHash, rebuildStateFromBeadComments, verifyBeadsStore } from "./beads.mjs";
 import { ensureDir, pathExists, readJson, writeJson, appendJsonl, removePath, listFilesRecursive } from "./fs.mjs";
 import {
@@ -233,14 +240,6 @@ function withProjectBeadsDir(env, adapter, projectRoot) {
 
 function inheritedBeadsDirIgnored(env, beadsDir) {
   return Boolean(env.BEADS_DIR) && path.resolve(env.BEADS_DIR) !== path.resolve(beadsDir);
-}
-
-function beadsExcludeMarker(adapter) {
-  const requiredDir = adapter?.beads?.requiredDir;
-  if (typeof requiredDir !== "string" || requiredDir === "" || path.isAbsolute(requiredDir) || beadsStoreIsTracked(adapter)) {
-    return null;
-  }
-  return `${requiredDir.replace(/\/+$/, "")}/`;
 }
 
 async function ensureProjectState(projectRoot, adapterName, adapter = null) {

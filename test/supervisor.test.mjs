@@ -183,13 +183,13 @@ test("setup creates the ignored reference cache and the project-local beads excl
   assert.equal(result.ok, true);
   assert.equal(result.resourcesRoot, path.join(projectRoot, ".resources"));
   assert.equal(result.beadsDir, path.join(projectRoot, ".beads"));
-  assert.equal(result.beadsTracked, false);
+  assert.equal(result.beadsTracked, true);
   const cacheReadme = await readFile(path.join(projectRoot, ".resources", "README.md"), "utf8");
   assert.match(cacheReadme, /never-committed cache/);
   assert.match(cacheReadme, /SOURCE\.md/);
   const exclude = await readFile(path.join(projectRoot, ".git", "info", "exclude"), "utf8");
   assert.match(exclude, /^\.resources\/$/m);
-  assert.match(exclude, /^\.beads\/$/m);
+  assert.doesNotMatch(exclude, /^\.beads\/$/m);
 
   await mkdir(path.join(projectRoot, ".resources", "beads"), { recursive: true });
   await writeFile(path.join(projectRoot, ".resources", "beads", "SOURCE.md"), "cached\n", "utf8");

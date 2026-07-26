@@ -11,7 +11,7 @@
   },
   "beads": {
     "requiredDir": ".beads",
-    "tracked": false,
+    "tracked": true,
     "memoryKey": "agent-instruction-files-structure"
   },
   "guidance": {

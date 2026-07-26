@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
 import {
+  beadsExcludeMarker,
   beadsStoreIsTracked,
   defaultAdapterRegistryPath,
   loadAdapter,
@@ -45,12 +46,21 @@ test("example adapter routes package tests and Solidity delivery distinctly", as
   ]);
 });
 
-test("example adapter keeps the beads store project-local and untracked", async () => {
+test("example adapter keeps the beads store project-local and tracked", async () => {
   const { adapter } = await loadAdapter("example-app");
   assert.equal(adapter.beads.requiredDir, ".beads");
-  assert.equal(beadsStoreIsTracked(adapter), false);
+  assert.equal(beadsStoreIsTracked(adapter), true);
   assert.equal(adapter.controlPlane.protectedPaths.includes(".beads"), true);
   assert.equal(resolveBeadsDir(adapter, "/tmp/project"), path.join("/tmp/project", ".beads"));
+});
+
+test("beadsExcludeMarker only fires for a relative, untracked store", () => {
+  assert.equal(beadsExcludeMarker({ beads: { requiredDir: ".beads", tracked: true } }), null);
+  assert.equal(beadsExcludeMarker({ beads: { requiredDir: ".beads", tracked: false } }), ".beads/");
+  assert.equal(beadsExcludeMarker({ beads: { requiredDir: ".beads" } }), ".beads/");
+  assert.equal(beadsExcludeMarker({ beads: { requiredDir: "state/beads/" } }), "state/beads/");
+  assert.equal(beadsExcludeMarker({ beads: { requiredDir: "/srv/shared-beads" } }), null);
+  assert.equal(beadsExcludeMarker({ beads: {} }), null);
 });
 
 test("resolveBeadsDir keeps absolute stores and rejects escapes", async () => {

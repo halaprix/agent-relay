@@ -22,10 +22,12 @@ test("guardrails reject writes outside owned paths", () => {
   );
 });
 
-test("privacy scan skips the cached reference resources root", async () => {
+test("privacy scan skips local data stores it does not author", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-privacy-resources-"));
   const generated = ["Generated", " with ", "Codex"].join("");
+  const actorEmail = ["actor", "@", "users.noreply.github.com"].join("");
   await createTextFile(path.join(dir, ".resources", "beads", "upstream.md"), generated);
+  await createTextFile(path.join(dir, ".beads", "embeddeddolt", "noms", "chunk"), actorEmail);
   assert.deepEqual(await scanPrivacy(dir), []);
 
   await createTextFile(path.join(dir, "tracked.md"), generated);

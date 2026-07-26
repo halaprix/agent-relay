@@ -43,6 +43,17 @@ export function beadsStoreIsTracked(adapter) {
   return adapter?.beads?.tracked === true;
 }
 
+export function beadsExcludeMarker(adapter) {
+  const requiredDir = adapter?.beads?.requiredDir;
+  if (typeof requiredDir !== "string" || requiredDir === "") {
+    return null;
+  }
+  if (path.isAbsolute(requiredDir) || beadsStoreIsTracked(adapter)) {
+    return null;
+  }
+  return `${requiredDir.replace(/\/+$/, "")}/`;
+}
+
 export function validateAdapter(adapter) {
   requireKeys("adapter", adapter, [
     "name",

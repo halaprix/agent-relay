@@ -92,7 +92,8 @@ The Beads store is project-local. `adapter.beads.requiredDir` defaults to `.bead
 
 - The supervisor derives `BEADS_DIR` from the project itself and exports it for every `bd` call. An inherited `BEADS_DIR` that points somewhere else is rejected instead of silently winning.
 - `bd where` must resolve inside that store; the embedded database directory beneath it counts as a match.
-- Tracking is an adapter choice. `beads.tracked: false` (default) keeps the store out of Git and `relay setup` adds `.beads/` to local Git exclude state; Dolt still synchronizes it over the Git remote through `refs/dolt/data`. Set `beads.tracked: true` for projects that commit the store, and Agent Relay leaves ignore state alone.
+- Tracking is an adapter choice, and `beads.tracked: true` matches what `bd init` actually does: it commits `.beads/config.yaml`, `metadata.json`, and `README.md`, and writes a nested `.beads/.gitignore` that keeps the Dolt database, sockets, and lock files out of Git. The issue data itself synchronizes over the Git remote through `refs/dolt/data`, not through the working tree. With `tracked: true`, Agent Relay leaves ignore state alone.
+- Set `beads.tracked: false` for a store that should stay entirely local, and `relay setup` adds `<requiredDir>/` to local Git exclude state next to `.agents/agent-relay/`. Files Git already tracks stay tracked, so switching an existing project needs `git rm --cached` as well.
 - Either way the store is protected control-plane state: workers never write it, and `.beads` sits in `controlPlane.protectedPaths`.
 - Absolute `requiredDir` values still work for projects that genuinely need an external store.
 - `relay doctor` reports `beadsDir`, `beadsTracked`, and `beadsStorePresent`, and fails with `project-misconfigured` when the store is missing so the human can run `bd init --quiet`.
