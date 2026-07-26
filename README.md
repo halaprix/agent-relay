@@ -104,7 +104,8 @@ Work is addressed hierarchically: `agent-relay-n95` is an epic, `agent-relay-n95
 
 - **`bd` mints the identifiers.** `bd create "…" -t epic` returns the hash id, and `bd create "…" --parent <id>` appends the next dotted segment. Never hand-write an id.
 - **Only leaves are claimable.** An epic is a container for scope, not a unit of work. `bd ready` will happily list an epic — pick a leaf underneath it instead. Agent Relay enforces this: `relay plan`, `relay run`, `relay resume`, and `relay review` refuse an id that has children, and name the open leaves beneath it. Detection reads the dependency graph, not the dotted id, so a project with flat ids behaves exactly as before.
-- **Discovered work becomes a child**, not a sibling. If a task turns up something it cannot absorb, the new bead hangs off the bead that found it, so the epic keeps showing the true remaining scope.
+- **Discovered work becomes a child**, not a sibling. If a task turns up something it cannot absorb, the new bead hangs off the bead that found it, so the epic keeps showing the true remaining scope. Hang it on the epic rather than the finishing task when the follow-up is out of that task's scope — a parent must not close while a child is open, or the child drops out of the tree view.
+- **The dotted id is display, the graph is truth.** `bd` does not renumber on re-parent, so an id can outlive the parent it names. Read `bd children` or the dependency graph, never the id string.
 - **Standalone work keeps a flat id.** A lone task does not need a ceremonial epic above it. Promote it to one when it grows children.
 - Epics close on their children through `--waits-for-gate` (`all-children` by default), so an epic left open is a real signal that something under it is unfinished.
 

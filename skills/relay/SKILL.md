@@ -27,7 +27,8 @@ Use `relay` when the project wants Claude, Codex, and agy to share the same Bead
 - Epics are containers: `agent-relay-n95` → `agent-relay-n95.1` → `agent-relay-n95.1.2`, three levels at most.
 - Create children with `bd create "…" --parent <id>`; it mints the dotted id. Never hand-write one.
 - Claim leaves, never an epic — `bd ready` lists epics too, and `relay plan`, `run`, `resume`, and `review` reject an id with children and name the open leaves beneath it.
-- Work discovered mid-task becomes a child of the bead that found it, so the epic still reflects the real remaining scope.
+- Work discovered mid-task becomes a child of the bead that found it, so the epic still reflects the real remaining scope. Put it on the epic instead when it falls outside the finishing task's scope: closing a parent while a child is open hides the child.
+- Ids are display only. `bd` keeps a dotted id after re-parenting, so trust `bd children` and the graph, not the string.
 
 ## Guardrails
 
