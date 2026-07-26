@@ -60,9 +60,9 @@ All commands return structured JSON and one of these stable exit classes:
 - `project-misconfigured`
 - `unrecoverable-run-state`
 
-## Example setup
+## Example adapter
 
-`adapters/example-app.json` encodes the first project adapter:
+`adapters/example-app.json` is a worked example, not a real project. It shows the shape an adapter takes; a real one belongs in the repository it describes:
 
 - The Beads store is the project-local `.beads/` directory created by `bd init`; no global store and no machine-specific path is involved.
 - `scripts/dev/worktree-setup.sh` is the required worktree bootstrap command.
@@ -141,7 +141,7 @@ Work is addressed hierarchically: `agent-relay-n95` is an epic, `agent-relay-n95
 - Scope-locked diff artifacts and per-review prompt/output files are stored for each review round.
 - Money-path and Solidity work can request stronger reviewer pools and adversarial questions through adapter risk classes.
 - Configured high-risk classes pause for plan approval before implementation.
-- The Example adapter runs package-level SDK and app tests during implementation, reruns formatting plus workspace lint/check-types before delivery, and adds `forge build` plus `forge test` for Solidity risk.
+- The bundled example adapter runs package-level SDK and app tests during implementation, reruns formatting plus workspace lint/check-types before delivery, and adds `forge build` plus `forge test` for Solidity risk.
 
 ## Static site
 
