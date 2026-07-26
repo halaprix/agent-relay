@@ -1973,3 +1973,5 @@ export async function cleanup(args) {
 }
 
 export { __prepareIsolatedProviderRunForTests, __setTestIsolationRunnerForTests, __resetTestIsolationRunnerForTests, __setBubblewrapSupportForTests, __resetBubblewrapSupportForTests } from "./containment.mjs";
+
+export const __candidateReviewProvidersForTests = candidateReviewProviders;

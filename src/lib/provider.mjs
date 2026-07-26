@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PROVIDERS } from "./providers/index.mjs";
 
 export function classifyProviderFailure(runResult) {
   const stderr = `${runResult.stderr || ""} ${runResult.stdout || ""}`.toLowerCase();
@@ -161,12 +162,42 @@ export function providerCommandFromConfig(config, providerName) {
   return provider?.command ? provider : null;
 }
 
-export function providerVendor(providerName, providerConfig) {
-  if (typeof providerConfig?.vendor !== "string" || providerConfig.vendor.trim() === "") {
+function normalizeVendor(value) {
+  if (typeof value !== "string" || value.trim() === "") {
     return null;
   }
-  const vendor = providerConfig.vendor.trim().toLowerCase();
+  const vendor = value.trim().toLowerCase();
   return SUPPORTED_PROVIDER_VENDORS.has(vendor) ? vendor : null;
+}
+
+// Vendor is a RESOLVED property, not a trusted declared string. A provider manifest may
+// resolve the vendor its configured model actually points at (resolveVendor); the operator
+// may also declare a vendor in providerConfig.vendor. When both are present they must agree
+// — quorum counting depends on this, and a model-agnostic provider that declares one vendor
+// while its configured model resolves to another must not be allowed to silently
+// misrepresent itself as a distinct vendor for review-quorum purposes.
+// A manifest implements resolveVendor only when vendor is genuinely DERIVABLE from
+// config — that means a model-agnostic CLI whose configured model argument names the
+// upstream. Fixed-vendor CLIs omit it: the config key is an operator-chosen label, not
+// evidence of which binary runs, so treating the name as proof would just relocate the
+// misdeclaration this function exists to catch. Their declared vendor stays authoritative.
+export function providerVendor(providerName, providerConfig) {
+  const declared = normalizeVendor(providerConfig?.vendor);
+  const manifest = PROVIDERS.find((candidate) => candidate.name === providerName);
+  const resolved = manifest?.resolveVendor ? normalizeVendor(manifest.resolveVendor(providerConfig)) : null;
+  if (declared && resolved) {
+    if (declared !== resolved) {
+      throw new Error(`provider ${providerName} declares vendor ${declared} but its configured model resolves to ${resolved}`);
+    }
+    return declared;
+  }
+  if (declared) {
+    return declared;
+  }
+  if (resolved) {
+    return resolved;
+  }
+  return null;
 }
 
 export function providerStrength(providerConfig) {
