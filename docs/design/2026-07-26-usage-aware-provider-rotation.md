@@ -26,16 +26,47 @@ Verified against the installed CLIs on 2026-07-26; captures are cached in `.reso
 | Codex | 0.145.0 | `exec --json` → final `turn.completed` event with `usage{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens}` | not reported | none |
 | agy | 1.1.7 | none — plain text only | not reported | none |
 
-Neither CLI exposes remaining account quota to a non-interactive caller. Codex has `/status` and
-`/usage`, both interactive-only. So quota pressure cannot be read; it can only be accumulated.
+### Quota probes
+
+Claude Code does expose remaining account quota to a non-interactive caller, and it is free:
+
+```
+$ claude -p "/usage" --output-format json     # total_cost_usd: 0, num_turns: 0, ~1s
+Current session: 25% used · resets Jul 26, 1:40pm (Europe/Warsaw)
+Current week (all models): 30% used · resets Jul 31, 1:59pm (Europe/Warsaw)
+Current week (Fable): 43% used · resets Jul 31, 2pm (Europe/Warsaw)
+```
+
+The CLI answers locally — no API call, no tokens, no rate-limit consumption — so it can be polled
+as often as we like. This is the vendor's own number, and it sees what a local ledger cannot:
+usage from other machines, other sessions, and claude.ai, plus the weekly limit that no per-call
+accumulation can infer.
+
+Two consequences for the design:
+
+1. **A probe, where one exists, outranks the estimate.** The rolling-window meter becomes the
+   fallback for providers that can't be probed, not the primary mechanism.
+2. **"When do we come back" needs no timestamp parsing.** Because probing is free, re-probe and
+   read the percentage. Reset strings carry no year and a named timezone
+   (`Jul 31, 2pm (Europe/Warsaw)`); keep them as a human-readable hint in the reason, not as the
+   thing eligibility is computed from.
+
+Codex has no non-interactive equivalent (`/status` and `/usage` are TUI-only; `codex doctor`
+reports nothing about limits) and agy has none at all. Those two keep the rolling estimate.
 
 ## Approach
 
-Two independent switches, both off by default:
+Three independent switches, all off by default:
 
-1. **`usageParser`** on a provider records what each call consumed. Observability only.
-2. **`budget`** on a provider turns those records into a rolling-window meter that can take the
+1. **`quotaProbe`** on a provider reads the vendor's own remaining quota. Authoritative where it
+   exists; today that means Claude.
+2. **`usageParser`** on a provider records what each call consumed. Observability, and the input
+   to the fallback meter.
+3. **`budget`** on a provider turns those records into a rolling-window meter that can take the
    provider out of rotation.
+
+A provider with a `quotaProbe` uses it and ignores the estimate. A provider without one falls back
+to `usageParser` + `budget`. A provider with neither is never cooled.
 
 A project that sets neither behaves exactly as it does today: no parsing, no new files, no new
 exit paths.
@@ -53,7 +84,16 @@ under the line.
   "command": "…",
   "args": ["…"],
   "vendor": "anthropic",
-  "usageParser": "claude-json",     // claude-json | codex-jsonl | absent
+  "quotaProbe": {                    // absent = no probe, fall back to the estimate
+    "parser": "claude-usage",
+    "command": "claude",
+    "args": ["-p", "/usage", "--output-format", "json"],
+    "meters": ["session", "week"],   // cool if any listed meter is over handoffAt
+    "handoffAt": 0.9,
+    "minIntervalMs": 60000,          // floor between probes
+    "timeoutMs": 30000
+  },
+  "usageParser": "claude-json",      // claude-json | codex-jsonl | absent
   "budget": {                        // absent = tracking only, no rotation
     "windowMs": 18000000,            // 5h
     "limitUsd": 40,                  // or limitTokens, exactly one
@@ -61,6 +101,10 @@ under the line.
   }
 }
 ```
+
+The probe is a declared command, not a hardcoded endpoint. Agent Relay stays provider-neutral: an
+operator whose environment can read quota some other way — a vendor API, a script that reads what
+their IDE panel reads — supplies that command instead, and only the parser name changes.
 
 Budgets live in project config, not in the adapter. They describe an account and a plan, which
 are properties of the operator, not of the repository being worked on.
