@@ -3,66 +3,409 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent Relay</title>
+    <title>Agent Relay — provider-resilient orchestration</title>
+    <meta
+      name="description"
+      content="Agent Relay keeps Claude, Codex, and agy on one Bead, one worktree, and one review record, and hands the run to the next provider when one quits."
+    />
+    <meta name="color-scheme" content="light dark" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="shell">
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="rail">
+      <a class="rail__mark" href="#main">Agent Relay</a>
+      <nav class="rail__nav" aria-label="Sections">
+        <a class="rail__link" href="#topology">Topology</a>
+        <a class="rail__link" href="#workflow">Workflow</a>
+        <a class="rail__link" href="#exits">Exit classes</a>
+        <a class="rail__link" href="#safety">Safety model</a>
+        <a class="rail__link" href="#setup">Setup</a>
+      </nav>
+      <span class="rail__meta">v0.1.0</span>
+    </header>
+
+    <main id="main">
       <section class="hero">
-        <p class="eyebrow">Provider-resilient engineering orchestration</p>
-        <h1>Agent Relay</h1>
-        <p class="lede">
-          Beads stays authoritative while a neutral supervisor routes Claude, Codex, and agy through the same worktree, evidence, and review record.
-        </p>
+        <div class="hero__inner">
+          <div class="hero__copy">
+            <p class="eyebrow">Provider-neutral supervisor · Beads-governed</p>
+            <h1 class="hero__title">
+              Provider exhaustion should not strand the work<span class="hero__stop">.</span>
+            </h1>
+            <p class="hero__lede">
+              One Bead, one worktree, one branch, one gate record, one review. When a provider hits a
+              quota wall mid-run, the supervisor hands the identical state to the next one and keeps
+              going — and it still stops at a review-clean PR for a person to merge.
+            </p>
+            <div class="hero__actions">
+              <a class="btn btn--live" href="#setup">Install it</a>
+              <a class="btn" href="#topology">See the topology</a>
+            </div>
+          </div>
+
+          <figure class="chain">
+            <svg
+              class="chain__svg"
+              viewBox="0 0 460 442"
+              role="img"
+              aria-labelledby="chainTitle chainDesc"
+            >
+              <title id="chainTitle">Failover through the relay chain</title>
+              <desc id="chainDesc">
+                A Bead enters the neutral supervisor, which routes to Claude. Claude is exhausted, so
+                the contact opens and the supervisor hands the same run to Codex, which continues
+                through gates and a two-vendor review to a human merge.
+              </desc>
+
+              <g class="wires">
+                <path class="wire" style="--d: 0.35s" d="M230 50 V92" pathLength="1" />
+                <path class="wire" style="--d: 0.95s" d="M230 136 V150" pathLength="1" />
+                <path class="wire wire--spent" style="--d: 1.15s" d="M230 150 H74 V160 M74 176 V186" pathLength="1" />
+                <path class="wire wire--idle" d="M230 150 H386 V186" pathLength="1" />
+                <path class="wire" style="--d: 2.5s" d="M230 150 V186" pathLength="1" />
+                <path class="wire" style="--d: 3.2s" d="M230 220 V256" pathLength="1" />
+                <path class="wire" style="--d: 4.5s" d="M230 300 V324" pathLength="1" />
+                <path class="wire" style="--d: 5.5s" d="M230 368 V392" pathLength="1" />
+              </g>
+
+              <g class="node" style="--d: 0.1s">
+                <rect class="chip" x="118" y="6" width="224" height="44" rx="10" />
+                <text class="chip__label" x="230" y="33">BEAD · example-app-142</text>
+              </g>
+
+              <g class="node" style="--d: 0.6s">
+                <rect class="chip" x="118" y="92" width="224" height="44" rx="10" />
+                <text class="chip__label" x="230" y="119">NEUTRAL SUPERVISOR</text>
+              </g>
+
+              <g class="node node--open" style="--d: 1.4s">
+                <rect class="chip" x="8" y="186" width="132" height="34" rx="9" />
+                <text class="chip__label" x="74" y="208">claude</text>
+              </g>
+
+              <g class="mark">
+                <circle class="brk__pin" cx="74" cy="160" r="2.5" />
+                <circle class="brk__pin" cx="74" cy="176" r="2.5" />
+                <path class="brk" d="M74 160 L89 171" />
+                <text class="flag" x="74" y="238">quota</text>
+              </g>
+
+              <g class="node" style="--d: 2.8s">
+                <rect class="chip" x="164" y="186" width="132" height="34" rx="9" />
+                <text class="chip__label" x="230" y="208">codex</text>
+              </g>
+
+              <g class="node node--idle">
+                <rect class="chip" x="320" y="186" width="132" height="34" rx="9" />
+                <text class="chip__label" x="386" y="208">agy</text>
+                <text class="flag flag--idle" x="386" y="238">standby</text>
+              </g>
+
+              <g class="node" style="--d: 3.5s">
+                <rect class="chip" x="118" y="256" width="224" height="44" rx="10" />
+                <text class="chip__label" x="196" y="283">GATES</text>
+                <circle class="pip" cx="258" cy="278" r="4" style="--d: 3.8s" />
+                <circle class="pip" cx="276" cy="278" r="4" style="--d: 3.95s" />
+                <circle class="pip" cx="294" cy="278" r="4" style="--d: 4.1s" />
+                <circle class="pip" cx="312" cy="278" r="4" style="--d: 4.25s" />
+              </g>
+
+              <g class="node" style="--d: 4.8s">
+                <rect class="chip" x="118" y="324" width="224" height="44" rx="10" />
+                <text class="chip__label" x="205" y="351">REVIEW</text>
+                <circle class="pip" cx="276" cy="346" r="4" style="--d: 5.05s" />
+                <circle class="pip" cx="294" cy="346" r="4" style="--d: 5.2s" />
+              </g>
+
+              <g class="node node--hold" style="--d: 5.8s">
+                <rect class="chip chip--hold" x="118" y="392" width="224" height="42" rx="10" />
+                <text class="chip__label" x="230" y="418">HUMAN MERGE</text>
+              </g>
+            </svg>
+
+            <figcaption class="log">
+              <p class="log__row" style="--d: 0.4s">
+                <span class="log__k">bead claimed</span><span class="log__v">spec hash locked</span>
+              </p>
+              <p class="log__row log__row--warn" style="--d: 1.9s">
+                <span class="log__k">route → claude</span><span class="log__v">quota exhausted</span>
+              </p>
+              <p class="log__row" style="--d: 2.5s">
+                <span class="log__k">handoff → codex</span><span class="log__v">same worktree, same spec</span>
+              </p>
+              <p class="log__row" style="--d: 3.6s">
+                <span class="log__k">gates 4/4</span><span class="log__v">rerun by the supervisor</span>
+              </p>
+              <p class="log__row" style="--d: 4.9s">
+                <span class="log__k">review 2/2</span><span class="log__v">distinct vendors</span>
+              </p>
+              <p class="log__row log__row--warn" style="--d: 5.9s">
+                <span class="log__k">awaiting human merge</span><span class="log__v">exit 10</span>
+              </p>
+            </figcaption>
+          </figure>
+        </div>
       </section>
-      <section>
-        <h2>Architecture</h2>
-        <pre class="diagram">Beads
-  |
-  v
-Neutral supervisor
-  |
-  +--> provider routing --> isolated worktree --> gates --> multi-vendor review
-  |
-  +--> checkpoint ledger --> resume / status
-  |
-  +--> human-only merge handoff</pre>
+
+      <section class="band" id="topology">
+        <p class="band__label">Topology</p>
+        <div class="band__body">
+          <h2 class="band__title">One state, three destinations</h2>
+          <p class="band__lede">
+            Beads holds the durable task record. The supervisor is provider-neutral: it owns routing,
+            evidence, and the stopping rules, so no single conversation owns the run.
+          </p>
+          <dl class="defs">
+            <div class="def">
+              <dt class="def__k">provider routing</dt>
+              <dd class="def__v">isolated worktree → gates → multi-vendor review</dd>
+            </div>
+            <div class="def">
+              <dt class="def__k">checkpoint ledger</dt>
+              <dd class="def__v">resume and status, rebuildable from Bead comments alone</dd>
+            </div>
+            <div class="def">
+              <dt class="def__k">human handoff</dt>
+              <dd class="def__v">a review-clean PR, and the merge stays with a person</dd>
+            </div>
+          </dl>
+        </div>
       </section>
-      <section>
-        <h2>Workflow</h2>
-        <ol>
-          <li>Recover the Bead, project law, and live store identity.</li>
-          <li>Plan, checkpoint, and pause for durable decisions.</li>
-          <li>Run one owned workstream per isolated worktree.</li>
-          <li>Re-run gates independently and review with distinct vendors.</li>
-          <li>Stop at a review-clean PR for human merge, or pause when vendor quorum is unavailable.</li>
-        </ol>
+
+      <section class="band" id="workflow">
+        <p class="band__label">Procedure</p>
+        <div class="band__body">
+          <h2 class="band__title">Workflow</h2>
+          <p class="band__lede">
+            Six commands, run in order the first time. Every one of them returns structured JSON.
+          </p>
+          <ol class="steps">
+            <li class="step">
+              <span class="step__n">01</span>
+              <code class="step__cmd">relay setup --adapter example-app</code>
+              <span class="step__text">
+                Writes local state under <code>.agents/agent-relay/</code>, creates the ignored
+                <code>.resources/</code> cache, and syncs role bundles into the providers you already
+                have installed.
+              </span>
+            </li>
+            <li class="step">
+              <span class="step__n">02</span>
+              <code class="step__cmd">relay doctor --json</code>
+              <span class="step__text">
+                Checks manifests, roles, adapters, local state, and the project-local Beads store.
+              </span>
+            </li>
+            <li class="step">
+              <span class="step__n">03</span>
+              <code class="step__cmd">relay plan &lt;bead-id&gt;</code>
+              <span class="step__text">
+                Recovers the Bead and project law, hashes the spec, and pauses for approval on the
+                risk classes that call for it.
+              </span>
+            </li>
+            <li class="step">
+              <span class="step__n">04</span>
+              <code class="step__cmd">relay run &lt;bead-id&gt;</code>
+              <span class="step__text">
+                Executes one owned workstream inside its own worktree, reruns the gates, and hands off
+                to the next provider on quota, auth, or service failures.
+              </span>
+            </li>
+            <li class="step">
+              <span class="step__n">05</span>
+              <code class="step__cmd">relay review &lt;bead-id&gt;</code>
+              <span class="step__text">
+                Scope-locked review over the exact diff artifact, by at least two distinct vendors for
+                non-documentation work.
+              </span>
+            </li>
+            <li class="step">
+              <span class="step__n">06</span>
+              <code class="step__cmd">relay resume &lt;bead-id&gt;</code>
+              <span class="step__text">
+                Reattaches after any interruption, from the local ledger or from Bead comments when the
+                ledger is gone.
+              </span>
+            </li>
+          </ol>
+        </div>
       </section>
-      <section>
-        <h2>Safety model</h2>
-        <ul>
-          <li>Workers use <code>bd --readonly</code>; the supervisor is the only Beads writer.</li>
-          <li>The Beads store is the project-local <code>.beads/</code> directory, git-ignored by default and never writable by workers.</li>
-          <li>Protected paths, blanket staging, remote mutation, and attribution are blocked.</li>
-          <li>Dirty worktrees are preserved for inspection instead of being deleted automatically.</li>
-          <li>Review-clean PR delivery runs only when delivery is configured; otherwise the run pauses for a human.</li>
-          <li>Version 0.1 is a local CLI/plugin package; a transient user service is optional future work, not a packaged requirement.</li>
-        </ul>
+
+      <section class="band" id="exits">
+        <p class="band__label">Contacts</p>
+        <div class="band__body">
+          <h2 class="band__title">Five ways a run can end</h2>
+          <p class="band__lede">
+            The exit class is the contract. Scripts can branch on it, and a person always knows
+            whether the run needs them.
+          </p>
+          <table class="codes">
+            <caption class="codes__caption">Stable exit classes and process exit codes</caption>
+            <thead>
+              <tr>
+                <th scope="col">Exit class</th>
+                <th scope="col">Code</th>
+                <th scope="col">Meaning</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="dot dot--ok" aria-hidden="true"></span>success</th>
+                <td class="codes__num">0</td>
+                <td>The phase finished with gate and review evidence behind it.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="dot dot--hold" aria-hidden="true"></span>human-action-required</th>
+                <td class="codes__num">10</td>
+                <td>An approval, a human-only gate, or missing delivery config stopped the run.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="dot dot--hold" aria-hidden="true"></span>provider-quorum-unavailable</th>
+                <td class="codes__num">11</td>
+                <td>No remaining provider or reviewer pool satisfies the vendor policy.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="dot dot--stop" aria-hidden="true"></span>project-misconfigured</th>
+                <td class="codes__num">12</td>
+                <td>Adapter, guidance files, or the Beads store are not in order.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="dot dot--stop" aria-hidden="true"></span>unrecoverable-run-state</th>
+                <td class="codes__num">13</td>
+                <td>Run state cannot be trusted. The worktree is preserved for inspection.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
-      <section>
-        <h2>Reference resources</h2>
-        <ul>
-          <li><code>.resources/</code> at the repository root is the standard, git-ignored cache of external documentation for agents.</li>
-          <li>One topic per subdirectory with a <code>SOURCE.md</code> recording the origin URL and fetch date.</li>
-          <li>It is excluded from snapshots, diffs, review bundles, privacy scans, and link checks, so it can never reach a PR.</li>
-          <li>Workers receive it read-only through <code>AGENT_RELAY_RESOURCES_DIR</code>; project law always outranks it.</li>
-        </ul>
+
+      <section class="band" id="safety">
+        <p class="band__label">Containment</p>
+        <div class="band__body">
+          <h2 class="band__title">Safety model</h2>
+          <p class="band__lede">
+            Every rule here fails closed. When the supervisor cannot prove a boundary held, it stops
+            instead of delivering.
+          </p>
+          <ul class="rows">
+            <li class="row">
+              <span class="row__tag">single writer</span>
+              <span class="row__text">
+                Workers run <code>bd --readonly</code>. The supervisor is the only process that writes
+                Beads.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">project store</span>
+              <span class="row__text">
+                The store is the repository's own <code>.beads/</code> directory, git-ignored by
+                default and never writable by a worker.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">isolation</span>
+              <span class="row__text">
+                Workers run in their own worktree with a declared read-only mount set and a synthetic
+                writable HOME. Never the main checkout.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">no drift</span>
+              <span class="row__text">
+                Blanket staging, force-push, remote mutation, protected-path edits, and attribution in
+                team-facing text are all rejected.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">kept evidence</span>
+              <span class="row__text">
+                Dirty or partially committed worktrees are preserved for inspection, never deleted on
+                your behalf.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">human merge</span>
+              <span class="row__text">
+                Delivery stops at a review-clean PR. Without delivery configured, review pauses and
+                says exactly what is missing.
+              </span>
+            </li>
+          </ul>
+        </div>
       </section>
-      <section>
-        <h2>Setup</h2>
-        <p>Install the plugin, then run <code>relay setup --adapter example-app</code> from the target project root.</p>
-        <p>Repo-local marketplace entries resolve through <code>plugins/agent-relay</code>. Private Pages publishing still depends on repository visibility and account plan support.</p>
+
+      <section class="band" id="cache">
+        <p class="band__label">Cache</p>
+        <div class="band__body">
+          <h2 class="band__title">Reference resources</h2>
+          <p class="band__lede">
+            <code>.resources/</code> at the repository root is where agents keep external
+            documentation instead of refetching it, guessing at it, or committing it.
+          </p>
+          <ul class="rows">
+            <li class="row">
+              <span class="row__tag">ignored</span>
+              <span class="row__text">
+                Git-ignored here, and <code>relay setup</code> adds it to local exclude state in the
+                target project.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">sourced</span>
+              <span class="row__text">
+                One topic per subdirectory with a <code>SOURCE.md</code> recording the origin URL and
+                the fetch date.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">invisible</span>
+              <span class="row__text">
+                Excluded from snapshots, diffs, review bundles, privacy scans, and link checks, so it
+                cannot reach a PR.
+              </span>
+            </li>
+            <li class="row">
+              <span class="row__tag">read-only</span>
+              <span class="row__text">
+                Mounted read-only for workers as <code>AGENT_RELAY_RESOURCES_DIR</code>. Project law
+                always outranks anything cached in it.
+              </span>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="band band--last" id="setup">
+        <p class="band__label">Install</p>
+        <div class="band__body">
+          <h2 class="band__title">Setup</h2>
+          <p class="band__lede">
+            Version 0.1.0 is a local CLI and plugin package. There is no service to run and no account
+            to create.
+          </p>
+          <div class="term" role="group" aria-label="Setup commands">
+            <p class="term__line"><span class="term__p">$</span> node scripts/sync-roles.mjs</p>
+            <p class="term__line term__line--note"># in the project you want to drive</p>
+            <p class="term__line"><span class="term__p">$</span> bd init --quiet</p>
+            <p class="term__line"><span class="term__p">$</span> relay setup --adapter example-app</p>
+            <p class="term__line"><span class="term__p">$</span> relay doctor --json</p>
+          </div>
+          <p class="band__note">
+            Claude loads the plugin from <code>.claude-plugin/</code>, Codex from
+            <code>.codex-plugin/</code>, and agy imports the same generated roles from
+            <code>.agents/agents/</code>. Repo-local marketplace entries resolve through
+            <code>plugins/agent-relay</code>.
+          </p>
+        </div>
       </section>
     </main>
+
+    <footer class="foot">
+      <span class="foot__mark">Agent Relay</span>
+      <span class="foot__meta">0.1.0 · MIT</span>
+    </footer>
   </body>
 </html>
