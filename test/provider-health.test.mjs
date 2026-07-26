@@ -291,6 +291,135 @@ for (const [label, badValue] of [
   });
 }
 
+for (const [label, badValue] of [
+  ["the empty string", ""],
+  ["a whitespace-only string", " "],
+  ["true", true],
+  ["an array", []],
+  ["a numeric string", "42"]
+]) {
+  test(`evaluateProvider throws a TypeError when a measured sample's budget field is ${label}`, () => {
+    const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 10 };
+    const badSample = { at: isoAt(-500), beadId: "b-bad-type", costUsd: badValue, measured: true };
+    assert.throws(
+      () => evaluateProvider({ health: { samples: [badSample] }, budget, now: NOW }),
+      TypeError
+    );
+  });
+}
+
+test("evaluateProvider throws a TypeError when a measured sample's budget field is negative", () => {
+  const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 10 };
+  const badSample = { at: isoAt(-500), beadId: "b-negative", costUsd: -100, measured: true };
+  assert.throws(
+    () => evaluateProvider({ health: { samples: [badSample] }, budget, now: NOW }),
+    TypeError
+  );
+});
+
+test("evaluateProvider rejects a negative sample even when it would otherwise cancel out real spend", () => {
+  const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 10 };
+  const positive = { at: isoAt(-500), beadId: "b-positive", costUsd: 100, measured: true };
+  const negative = { at: isoAt(-400), beadId: "b-negative", costUsd: -100, measured: true };
+  assert.throws(
+    () => evaluateProvider({ health: { samples: [positive, negative] }, budget, now: NOW }),
+    TypeError
+  );
+});
+
+test("evaluateProvider still accepts zero as a valid sample value", () => {
+  const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 10 };
+  const zero = { at: isoAt(-500), beadId: "b-zero", costUsd: 0, measured: true };
+  const result = evaluateProvider({ health: { samples: [zero] }, budget, now: NOW });
+  assert.equal(result.eligible, true);
+  assert.equal(result.state, "eligible");
+});
+
+test("evaluateProvider treats a spend within floating-point noise of the threshold as cooling", () => {
+  // 0.1 + 0.7 sums to 0.7999999999999999 in IEEE-754 doubles, strictly less
+  // than 0.8 threshold — the true (decimal) sum is exactly at the threshold,
+  // so this must read as cooling, not eligible.
+  const budget = { windowMs: 1000, handoffAt: 0.8, limitUsd: 1 };
+  const sampleA = { at: isoAt(-500), beadId: "b-float-a", costUsd: 0.1, measured: true };
+  const sampleB = { at: isoAt(-400), beadId: "b-float-b", costUsd: 0.7, measured: true };
+  assert.equal(sampleA.costUsd + sampleB.costUsd < 0.8, true);
+  const result = evaluateProvider({ health: { samples: [sampleA, sampleB] }, budget, now: NOW });
+  assert.equal(result.eligible, false);
+  assert.equal(result.state, "cooling");
+});
+
+test("recordProviderSample carries dropped-by-cap spend forward so 201 x $1 measured samples against a $201 limit reads as cooling, not eligible", async () => {
+  const projectRoot = await createProjectRoot();
+  const windowMs = 1000 * 60 * 60 * 24 * 365; // huge window so nothing ages out
+  const seeded = Array.from({ length: 200 }, (_, index) => ({
+    at: isoAt(index * 1000),
+    beadId: `seed-${index}`,
+    costUsd: 1,
+    measured: true
+  }));
+  await writeJson(providerHealthPath(projectRoot), {
+    version: 1,
+    providers: {
+      anthropic: {
+        samples: seeded,
+        state: "eligible",
+        reason: null,
+        cooledUntil: null,
+        observedAt: NOW
+      }
+    }
+  });
+
+  const newSample = { at: isoAt(200 * 1000), beadId: "seed-200", costUsd: 1, measured: true };
+  const record = await recordProviderSample({
+    projectRoot,
+    providerName: "anthropic",
+    sample: newSample,
+    budget: { windowMs, handoffAt: 1, limitUsd: 201 },
+    now: isoAt(200 * 1000)
+  });
+
+  assert.equal(record.samples.length, 200);
+  assert.equal(record.truncated, true);
+  assert.equal(record.state, "cooling");
+  assert.ok(record.carried);
+  assert.equal(record.carried.costUsd, 1);
+  assert.equal(record.carried.count, 1);
+  assert.equal(record.carried.oldestAt, seeded[0].at);
+});
+
+test("recordProviderSample's carried spend ages out of the window exactly like an ordinary sample", async () => {
+  const projectRoot = await createProjectRoot();
+  const windowMs = 1000;
+  await writeJson(providerHealthPath(projectRoot), {
+    version: 1,
+    providers: {
+      anthropic: {
+        samples: [{ at: isoAt(-500), beadId: "surviving", costUsd: 1, measured: true }],
+        state: "eligible",
+        reason: null,
+        cooledUntil: null,
+        observedAt: isoAt(-500),
+        carried: { costUsd: 100, tokens: 0, oldestAt: isoAt(-5000), count: 5 }
+      }
+    }
+  });
+
+  const newSample = { at: NOW, beadId: "new", costUsd: 1, measured: true };
+  const record = await recordProviderSample({
+    projectRoot,
+    providerName: "anthropic",
+    sample: newSample,
+    budget: { windowMs, handoffAt: 1, limitUsd: 1000 },
+    now: NOW
+  });
+
+  // The stale carry (oldestAt = -5000ms, far outside the 1000ms window) must
+  // no longer count toward spend or persist on the record.
+  assert.equal(record.carried, undefined);
+  assert.equal(record.state, "eligible");
+});
+
 test("loadProviderHealth returns the empty shape for a missing or corrupt file, and recording afterwards succeeds", async () => {
   const projectRoot = await createProjectRoot();
   const missing = await loadProviderHealth(projectRoot);
