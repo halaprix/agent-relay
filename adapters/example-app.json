@@ -190,7 +190,7 @@
     ]
   },
   "providers": {
-    "orchestratorOrder": [
+    "providerOrder": [
       "claude",
       "codex",
       "agy",

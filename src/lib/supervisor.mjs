@@ -1129,7 +1129,7 @@ async function ensurePlanReady({ projectRoot, beadId, state, config, adapter, en
 }
 
 async function executeCoder({ projectRoot, beadId, state, config, adapter, env }) {
-  const order = adapter.providers.orchestratorOrder;
+  const order = adapter.providers.providerOrder;
   const limit = config.correctionLimit ?? 2;
   const gateGroupNames = gateGroupsForPhase(adapter, "implementation", state.riskClass);
   const baselineSnapshot = await snapshotForState(state);
@@ -1859,7 +1859,7 @@ async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.
       pendingCorrection: buildCorrectionReason(findings),
       providerCursor: {
         ...(state.providerCursor || {}),
-        coderIndex: Math.max(adapter.providers.orchestratorOrder.indexOf(state.lastCoder), 0)
+        coderIndex: Math.max(adapter.providers.providerOrder.indexOf(state.lastCoder), 0)
       }
     });
     await appendCheckpoint({
@@ -1922,7 +1922,7 @@ async function resumeUnlocked({ projectRoot, adapterName, beadId, env = process.
   return runUnlocked({ projectRoot, adapterName, beadId, env });
 }
 
-async function cleanupUnlocked({ projectRoot, adapterName = "example-app", beadId }) {
+async function cleanupUnlocked({ projectRoot, adapterName, beadId }) {
   const { config } = await ensureProjectState(projectRoot, adapterName);
   const state = await readJson(runStatePath(projectRoot, beadId));
   if (state.phase !== "complete") {

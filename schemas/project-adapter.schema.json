@@ -176,11 +176,11 @@
     "providers": {
       "type": "object",
       "required": [
-        "orchestratorOrder",
+        "providerOrder",
         "capabilities"
       ],
       "properties": {
-        "orchestratorOrder": {
+        "providerOrder": {
           "$ref": "#/$defs/stringArray"
         },
         "capabilities": {

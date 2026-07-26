@@ -26,7 +26,7 @@ async function main() {
     case "gates":
       return gates({ projectRoot, adapterName, beadId: parsed.positionals[0], gateName: parsed.positionals[1] });
     case "cleanup":
-      return cleanup({ projectRoot, beadId: parsed.positionals[0] });
+      return cleanup({ projectRoot, adapterName, beadId: parsed.positionals[0] });
     case "sync-adapters":
       return (await import("../src/lib/adapter.mjs")).syncAdapters();
     default:

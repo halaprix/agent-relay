@@ -163,8 +163,8 @@ export function validateAdapter(adapter) {
   }
   requireKeys("adapter.controlPlane", adapter.controlPlane, ["protectedPaths"]);
   assertStringArray(adapter.controlPlane.protectedPaths, "adapter.controlPlane.protectedPaths");
-  requireKeys("adapter.providers", adapter.providers, ["orchestratorOrder", "capabilities"]);
-  assertStringArray(adapter.providers.orchestratorOrder, "adapter.providers.orchestratorOrder");
+  requireKeys("adapter.providers", adapter.providers, ["providerOrder", "capabilities"]);
+  assertStringArray(adapter.providers.providerOrder, "adapter.providers.providerOrder");
   if (adapter.providers.capabilities === null || typeof adapter.providers.capabilities !== "object") {
     throw new Error("adapter.providers.capabilities must be an object");
   }

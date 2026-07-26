@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { loadAdapter } from "../src/lib/adapter.mjs";
 import { acquireLock } from "../src/lib/lock.mjs";
 import { projectStateRoot, repoPath, runStatePath } from "../src/lib/paths.mjs";
-import { pathExists, removePath } from "../src/lib/fs.mjs";
+import { pathExists, readJson, removePath } from "../src/lib/fs.mjs";
 import {
   __prepareIsolatedProviderRunForTests,
   __resetBubblewrapSupportForTests,
@@ -248,6 +248,16 @@ test("status groups runs under their epic", { timeout: 10000 }, async () => {
   const groups = Object.fromEntries(result.groups.map((group) => [group.epic, group.beadIds]));
   assert.deepEqual(groups["example-app-n95"], ["example-app-n95.1", "example-app-n95.2"]);
   assert.deepEqual(groups["example-app-6st"], ["example-app-6st"]);
+});
+
+test("cleanup records the requested adapter rather than a hardcoded default", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  // cleanup's only use of adapterName is initialising project config, so that write is
+  // where a hardcoded default would show up. It fails afterwards on the missing run
+  // state, which is expected and not what this test is about.
+  await cleanup({ projectRoot, adapterName: "some-other-adapter", beadId: "example-app-123" }).catch(() => {});
+  const written = await readJson(path.join(projectStateRoot(projectRoot), "config.json"));
+  assert.equal(written.adapter, "some-other-adapter");
 });
 
 test("doctor honors the requested adapter and validates required files", { timeout: 10000 }, async () => {
