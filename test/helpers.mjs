@@ -31,7 +31,9 @@ export async function cleanupFixtures() {
   if (!sessionRootPromise) return;
   const root = await sessionRootPromise;
   sessionRootPromise = null;
-  await rm(root, { recursive: true, force: true });
+  // maxRetries: a test child that outlives its kill can recreate a file mid-removal
+  // (ENOTEMPTY), which would strand the whole session root.
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
 export const defaultAdapterBeadsRoot = JSON.parse(

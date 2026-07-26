@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { withTempDir } from "./fs.mjs";
 import { PROVIDERS } from "./providers/index.mjs";
 
 export function classifyProviderFailure(runResult) {
@@ -56,7 +56,30 @@ export async function runProviderCommand({
     resolvedCommand === process.execPath && command !== process.execPath
       ? [command, ...args]
       : args;
-  const captureDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-capture-"));
+  return withTempDir("agent-relay-capture-", (captureDir) => runProviderCommandInCaptureDir({
+    providerName,
+    resolvedCommand,
+    resolvedArgs,
+    cwd,
+    env,
+    timeoutMs,
+    inheritEnv,
+    captureViaEnv,
+    captureDir
+  }));
+}
+
+function runProviderCommandInCaptureDir({
+  providerName,
+  resolvedCommand,
+  resolvedArgs,
+  cwd,
+  env,
+  timeoutMs,
+  inheritEnv,
+  captureViaEnv,
+  captureDir
+}) {
   const stdoutPath = path.join(captureDir, "stdout.log");
   const stderrPath = path.join(captureDir, "stderr.log");
   return new Promise((resolve) => {

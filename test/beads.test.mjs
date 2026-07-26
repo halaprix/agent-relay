@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { epicIdFor, listBeadChildren, storePathMatches, verifyBeadsStore } from "../src/lib/beads.mjs";
 import { loadAdapter } from "../src/lib/adapter.mjs";
 import { beadsDirFor, cleanupFixtures, createFakeBdStore } from "./helpers.mjs";
@@ -36,6 +38,51 @@ test("verifyBeadsStore validates array-backed Beads payloads, acceptance_criteri
   assert.equal(Array.isArray(result.comments), true);
   assert.equal(result.claim.claimed, true);
 }, { signal: AbortSignal.timeout(5000) });
+
+test("runBd does not leak its capture temp dir on success or failure", async () => {
+  const { adapter } = await loadAdapter("example-app");
+  const storePath = await createFakeBdStore({ projectRoot });
+  // fake-bd appends every capture dir it is handed here, so cleanup is asserted on
+  // those exact paths. Counting `agent-relay-bd-capture-*` in tmpdir would be racy:
+  // the prefix has no per-call discriminator and `node --test` runs test files
+  // concurrently, so a sibling file's in-flight bd call lands in the count.
+  const reportPath = path.join(path.dirname(storePath), "capture-report.json");
+  const env = {
+    BEADS_DIR: projectBeadsDir,
+    AGENT_RELAY_BD_BIN: repoPath("test", "fixtures", "fake-bd.mjs"),
+    FAKE_BD_STORE: storePath,
+    FAKE_BD_CAPTURE_REPORT: reportPath,
+    PATH: process.env.PATH
+  };
+  const reportedDirs = async () => JSON.parse(await readFile(reportPath, "utf8"));
+
+  const children = listBeadChildren({ env, beadId: "example-app-123", beadsDir: projectBeadsDir });
+  assert.deepEqual(children, []);
+  const afterSuccess = await reportedDirs();
+  assert.ok(afterSuccess.length >= 1, "fake-bd reported no capture dir on the success path");
+  for (const dir of afterSuccess) {
+    assert.equal(existsSync(dir), false, `leaked ${dir}`);
+  }
+
+  assert.throws(
+    () =>
+      verifyBeadsStore({
+        adapter,
+        beadId: "example-app-missing",
+        beadsDir: projectBeadsDir,
+        env
+      }),
+    /bd show failed/
+  );
+  const afterFailure = await reportedDirs();
+  assert.ok(
+    afterFailure.length > afterSuccess.length,
+    "the failing bd call did not report a capture dir"
+  );
+  for (const dir of afterFailure) {
+    assert.equal(existsSync(dir), false, `leaked ${dir}`);
+  }
+});
 
 test("epicIdFor reduces a dotted bead id to its epic", () => {
   assert.equal(epicIdFor("agent-relay-n95"), "agent-relay-n95");

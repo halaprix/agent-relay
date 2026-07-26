@@ -1,9 +1,8 @@
 import path from "node:path";
-import os from "node:os";
 import { spawn } from "node:child_process";
-import { cp, lstat, mkdtemp, readFile, readlink, writeFile } from "node:fs/promises";
+import { cp, lstat, readFile, readlink, writeFile } from "node:fs/promises";
 import { SNAPSHOT_IGNORE_PREFIXES } from "./constants.mjs";
-import { ensureDir, listFilesRecursive, pathExists, toPosixRelative } from "./fs.mjs";
+import { ensureDir, listFilesRecursive, pathExists, toPosixRelative, withTempDir } from "./fs.mjs";
 import { sha256Bytes, sha256Text } from "./hash.mjs";
 import { runProviderCommand } from "./provider.mjs";
 
@@ -105,8 +104,13 @@ async function recordWorktreePath(rootDir, relativePath) {
 }
 
 async function runGitBuffer(config, cwd, args, { timeoutMs = 30000 } = {}) {
+  return withTempDir("agent-relay-git-capture-", (captureDir) =>
+    runGitBufferInCaptureDir(config, cwd, args, timeoutMs, captureDir)
+  );
+}
+
+function runGitBufferInCaptureDir(config, cwd, args, timeoutMs, captureDir) {
   const spawnSpec = resolveSpawn(gitCommand(config), args);
-  const captureDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-git-capture-"));
   const stdoutPath = path.join(captureDir, "stdout.bin");
   const stderrPath = path.join(captureDir, "stderr.log");
   return new Promise((resolve) => {

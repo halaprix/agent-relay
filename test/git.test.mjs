@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import {
@@ -10,7 +11,7 @@ import {
   captureSnapshot,
   stageExplicitPaths
 } from "../src/lib/git.mjs";
-import { cleanupFixtures, createProjectFixture, fixtureDir } from "./helpers.mjs";
+import { cleanupFixtures, createCommandShim, createProjectFixture, fixtureDir } from "./helpers.mjs";
 
 const execFile = promisify(execFileCallback);
 
@@ -166,4 +167,88 @@ test("broken symlinks remain symlinks in reviewed and staged artifacts", { timeo
   assert.equal(record.type, "symlink");
   assert.equal(record.mode, "120000");
   assert.equal(record.symlinkTarget, "missing-target.txt");
+});
+
+test("runGitBuffer (via buildStagedDiffArtifact) does not leak its capture temp dir on success or failure", { timeout: 15000 }, async () => {
+  const projectRoot = await createRealGitProjectFixture();
+  const gitConfig = {
+    git: {
+      command: "git",
+      env: {},
+      statusArgs: ["status", "--short"]
+    }
+  };
+  await writeFile(path.join(projectRoot, "tracked.txt"), "tracked\n", "utf8");
+  await runGitCommand(projectRoot, ["add", "."]);
+  await runGitCommand(projectRoot, ["commit", "-m", "fixture"]);
+  await writeFile(path.join(projectRoot, "tracked.txt"), "changed\n", "utf8");
+  await stageExplicitPaths(gitConfig, projectRoot, ["tracked.txt"]);
+
+  // Wrap real git in a shim that records the capture dir it was handed, so cleanup is
+  // asserted on those exact paths. Counting `agent-relay-git-capture-*` in tmpdir would
+  // be racy: the prefix has no per-call discriminator and `node --test` runs test files
+  // concurrently, so a sibling file's in-flight git call lands in the count.
+  const shimDir = await fixtureDir("agent-relay-git-capture-cleanup-");
+  const stagedArtifactPath = path.join(shimDir, "staged.json");
+  const reportPath = path.join(shimDir, "capture-report.txt");
+  const shimPath = await createCommandShim(
+    shimDir,
+    "git-reporting-shim",
+    [
+      "#!/usr/bin/env bash",
+      'printf "%s\\n" "$(dirname "$AGENT_RELAY_STDOUT_FILE")" >> "$AGENT_RELAY_TEST_CAPTURE_REPORT"',
+      'exec git "$@"',
+      ""
+    ].join("\n")
+  );
+  const reportingGitConfig = {
+    git: {
+      ...gitConfig.git,
+      command: shimPath,
+      env: { AGENT_RELAY_TEST_CAPTURE_REPORT: reportPath }
+    }
+  };
+  const reportedDirs = async () =>
+    (await readFile(reportPath, "utf8")).split("\n").filter(Boolean);
+
+  await buildStagedDiffArtifact({
+    config: reportingGitConfig,
+    worktreePath: projectRoot,
+    changedPaths: ["tracked.txt"],
+    filePath: stagedArtifactPath
+  });
+  const afterSuccess = await reportedDirs();
+  assert.ok(afterSuccess.length >= 1, "the git shim reported no capture dir");
+  for (const dir of afterSuccess) {
+    assert.equal(existsSync(dir), false, `leaked ${dir}`);
+  }
+
+  // Same shim, but exiting non-zero: the capture dir is still reported before the
+  // failure, so cleanup on the error path is checked against a known path too.
+  const failingShimPath = await createCommandShim(
+    shimDir,
+    "git-failing-shim",
+    [
+      "#!/usr/bin/env bash",
+      'printf "%s\\n" "$(dirname "$AGENT_RELAY_STDOUT_FILE")" >> "$AGENT_RELAY_TEST_CAPTURE_REPORT"',
+      "exit 3",
+      ""
+    ].join("\n")
+  );
+  await assert.rejects(() =>
+    buildStagedDiffArtifact({
+      config: { git: { ...reportingGitConfig.git, command: failingShimPath } },
+      worktreePath: projectRoot,
+      changedPaths: ["tracked.txt"],
+      filePath: stagedArtifactPath
+    })
+  );
+  const afterFailure = await reportedDirs();
+  assert.ok(
+    afterFailure.length > afterSuccess.length,
+    "the failing git call did not report a capture dir"
+  );
+  for (const dir of afterFailure) {
+    assert.equal(existsSync(dir), false, `leaked ${dir}`);
+  }
 });

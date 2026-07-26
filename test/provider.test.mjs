@@ -1,12 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { repoPath } from "../src/lib/paths.mjs";
 import { classifyProviderFailure, parseWorkerReport, providerVendor, runProviderCommand, validateRuntimeProviderConfig } from "../src/lib/provider.mjs";
 import { PROVIDERS } from "../src/lib/providers/index.mjs";
 import { __candidateReviewProvidersForTests } from "../src/lib/supervisor.mjs";
 import { cleanupFixtures, fixtureDir } from "./helpers.mjs";
+
+// Ask the child to report the capture directory it was handed, so cleanup can be
+// asserted on that exact path. Counting `agent-relay-capture-*` in tmpdir instead
+// would be racy: the prefix carries no per-call discriminator, and `node --test`
+// runs every test file concurrently, so a sibling file's in-flight provider run
+// shows up in the count.
+async function captureDirUsedBy({ providerName, script }) {
+  const result = await runProviderCommand({
+    providerName,
+    command: process.execPath,
+    args: ["-e", `process.stdout.write(process.env.AGENT_RELAY_STDOUT_FILE); ${script}`],
+    cwd: process.cwd(),
+    captureViaEnv: true,
+    timeoutMs: 5000
+  });
+  const reported = result.stdout.trim();
+  assert.notEqual(reported, "", "child did not receive AGENT_RELAY_STDOUT_FILE");
+  return { result, captureDir: path.dirname(reported) };
+}
 
 test.after(cleanupFixtures);
 
@@ -214,4 +234,36 @@ test("runProviderCommand times out by killing the process group and stops child 
   const secondStat = await stat(markerPath);
   assert.equal(secondStat.size, firstStat.size);
   assert.ok(writes.length >= 2);
+});
+
+test("runProviderCommand does not leak its capture temp dir on success", async () => {
+  const { result, captureDir } = await captureDirUsedBy({
+    providerName: "capture-cleanup-success",
+    script: ""
+  });
+  assert.equal(result.code, 0);
+  assert.equal(existsSync(captureDir), false, `leaked ${captureDir}`);
+});
+
+test("runProviderCommand does not leak its capture temp dir when the command fails", async () => {
+  const { result, captureDir } = await captureDirUsedBy({
+    providerName: "capture-cleanup-failure",
+    script: "process.stderr.write('boom'); process.exit(3);"
+  });
+  assert.equal(result.code, 3);
+  assert.equal(existsSync(captureDir), false, `leaked ${captureDir}`);
+});
+
+test("runProviderCommand does not leak its capture temp dir when spawn errors", async () => {
+  // A spawn error never starts a child, so there is no one to report the capture
+  // path back. The cleanup itself is `withTempDir`'s `finally`, covered directly
+  // and deterministically in fs.test.mjs; here we only pin the failure contract.
+  const result = await runProviderCommand({
+    providerName: "capture-cleanup-spawn-error",
+    command: path.join(process.cwd(), "definitely-not-a-real-executable-binary"),
+    args: [],
+    cwd: process.cwd(),
+    timeoutMs: 5000
+  });
+  assert.equal(result.code, 1);
 });

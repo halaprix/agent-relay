@@ -1,13 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadAdapter } from "../src/lib/adapter.mjs";
 import { acquireLock } from "../src/lib/lock.mjs";
 import { projectStateRoot, repoPath, runStatePath } from "../src/lib/paths.mjs";
 import { pathExists, readJson, removePath } from "../src/lib/fs.mjs";
+
+async function countTmpEntriesWithPrefix(prefix) {
+  const entries = await readdir(os.tmpdir());
+  return entries.filter((entry) => entry.startsWith(prefix)).length;
+}
 import {
   __prepareIsolatedProviderRunForTests,
   __resetBubblewrapSupportForTests,
@@ -322,6 +328,9 @@ test("isolated provider runs mount the project reference cache read-only", { tim
   const beadsMountIndex = indexOfMount(isolated.args, await realpath(path.join(projectRoot, ".beads")));
   assert.notEqual(beadsMountIndex, -1);
   assert.equal(isolated.args[beadsMountIndex], "--ro-bind");
+  // Production always finalizes via runCommandChecked's postRun; tests that prepare
+  // without running must do it explicitly or they leak the bundle.
+  await isolated.finalize();
 });
 
 test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bubblewrap mounts with share-net, readonly blockers, and a writable sandbox HOME", { timeout: 10000 }, async () => {
@@ -427,6 +436,28 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
     assert.notEqual(blockedGitMountIndex, -1);
     assert.equal(isolated.args[blockedGitMountIndex], "--ro-bind");
 
+    // finalize() must remove both the bundle root and the sandbox root it
+    // returned - and must do so only when explicitly called, never earlier
+    // (the assertions above read isolated.bundleRoot/promptPath contents
+    // without ever calling finalize()).
+    const sandboxRoot = path.dirname(isolated.env.HOME);
+    assert.equal(await pathExists(isolated.bundleRoot), true);
+    assert.equal(await pathExists(sandboxRoot), true);
+    await isolated.finalize();
+    assert.equal(await pathExists(isolated.bundleRoot), false);
+    assert.equal(await pathExists(sandboxRoot), false);
+
+    // A prepareIsolatedProviderRun rejection (here, the readOnlyMounts overlap
+    // check) must not leak the provider bundle it already created before
+    // throwing.
+    // Use a bead id unique to this probe so the bundle prefix cannot collide with a
+    // concurrently-running test file: `node --test` runs files in parallel, and
+    // `example-app-123` + `claude` is the suite's standard pairing, so counting the
+    // shared prefix would see other processes' in-flight bundles.
+    const leakProbeBeadId = "example-app-bundle-leak-probe";
+    const bundlePrefix = `agent-relay-provider-${leakProbeBeadId}-claude-`;
+    const bundleCountBeforeRejection = await countTmpEntriesWithPrefix(bundlePrefix);
+    assert.equal(bundleCountBeforeRejection, 0);
     await assert.rejects(
       () =>
         __prepareIsolatedProviderRunForTests({
@@ -444,7 +475,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
               readOnlyMounts: [projectRoot]
             }
           },
-          beadId: "example-app-123",
+          beadId: leakProbeBeadId,
           providerName: "claude",
           cwd: projectRoot,
           writableRoot: projectRoot,
@@ -452,6 +483,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
         }),
       /cannot overlap protected project, worktree, Beads, or control-plane paths/
     );
+    assert.equal(await countTmpEntriesWithPrefix(bundlePrefix), bundleCountBeforeRejection);
 
     await assert.rejects(
       () =>
@@ -587,6 +619,7 @@ test("prepareIsolatedProviderRun requires explicit vendor metadata and builds bu
       promptContents: "test prompt"
     });
     assert.notEqual(indexOfMount(siblingIsolated.args, dotDotRuntimeSibling), -1);
+    await siblingIsolated.finalize();
 
     const externalGitRoot = await fixtureDir("agent-relay-external-git-");
     const externalGitDir = path.join(externalGitRoot, "worktrees", "wt");

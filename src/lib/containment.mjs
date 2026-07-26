@@ -2,7 +2,7 @@
 import path from "node:path";
 import os from "node:os";
 import { copyFile, lstat, readFile, realpath, writeFile, mkdtemp } from "node:fs/promises";
-import { ensureDir, pathExists } from "./fs.mjs";
+import { ensureDir, pathExists, removePath, withTempDir } from "./fs.mjs";
 import { projectResourcesRoot, projectStateRoot } from "./paths.mjs";
 import { resolveBeadsDir, resolveResourcesRootName } from "./adapter.mjs";
 import { runProviderCommand, validateRuntimeProviderConfig } from "./provider.mjs";
@@ -169,47 +169,48 @@ async function bubblewrapSupported() {
     if (!resolvedProbeCommand) {
       return false;
     }
-    const probeDir = await mkdtemp(path.join(os.tmpdir(), "agent-relay-bwrap-probe-"));
-    const run = await runProviderCommand({
-      providerName: "bubblewrap-probe",
-      command: "/usr/bin/bwrap",
-      args: [
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-all",
-        "--share-net",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--ro-bind",
-        "/bin",
-        "/bin",
-        "--ro-bind",
-        "/lib",
-        "/lib",
-        "--ro-bind",
-        "/lib64",
-        "/lib64",
-        "--ro-bind",
-        "/etc",
-        "/etc",
-        "--dir",
-        probeDir,
-        "--chdir",
-        probeDir,
-        resolvedProbeCommand
-      ],
-      cwd: probeDir,
-      env: {},
-      timeoutMs: 2000,
-      inheritEnv: false,
-      captureViaEnv: false
+    return withTempDir("agent-relay-bwrap-probe-", async (probeDir) => {
+      const run = await runProviderCommand({
+        providerName: "bubblewrap-probe",
+        command: "/usr/bin/bwrap",
+        args: [
+          "--die-with-parent",
+          "--new-session",
+          "--unshare-all",
+          "--share-net",
+          "--proc",
+          "/proc",
+          "--dev",
+          "/dev",
+          "--ro-bind",
+          "/usr",
+          "/usr",
+          "--ro-bind",
+          "/bin",
+          "/bin",
+          "--ro-bind",
+          "/lib",
+          "/lib",
+          "--ro-bind",
+          "/lib64",
+          "/lib64",
+          "--ro-bind",
+          "/etc",
+          "/etc",
+          "--dir",
+          probeDir,
+          "--chdir",
+          probeDir,
+          resolvedProbeCommand
+        ],
+        cwd: probeDir,
+        env: {},
+        timeoutMs: 2000,
+        inheritEnv: false,
+        captureViaEnv: false
+      });
+      return run.code === 0;
     });
-    return run.code === 0;
   })();
   return bubblewrapSupportPromise;
 }
@@ -410,11 +411,23 @@ export async function prepareIsolatedProviderRun({
 }) {
   validateRuntimeProviderConfig(providerName, providerConfig);
   const bundle = await createProviderBundle({ beadId, providerName, promptContents: "", copiedArtifacts });
+  let sandboxRoot = null;
+  try {
+    return await buildIsolatedRun();
+  } catch (error) {
+    await removePath(bundle.bundleRoot).catch(() => {});
+    if (sandboxRoot) {
+      await removePath(sandboxRoot).catch(() => {});
+    }
+    throw error;
+  }
+
+  async function buildIsolatedRun() {
   const finalPromptContents = typeof promptBuilder === "function"
     ? await promptBuilder(bundle)
     : promptContents;
   await writeFile(bundle.promptPath, `${finalPromptContents}\n`, "utf8");
-  const sandboxRoot = path.join(writableRoot, ".agent-relay-sandbox", `${providerName}-${Date.now()}-${process.pid}`);
+  sandboxRoot = path.join(writableRoot, ".agent-relay-sandbox", `${providerName}-${Date.now()}-${process.pid}`);
   await ensureDir(path.join(sandboxRoot, "home"));
   const { mirrored, flush } = await mirrorProviderEnvFiles(providerConfig.env || {}, sandboxRoot, providerName);
   const pathValue = mirrored.PATH || process.env.PATH || "";
@@ -545,6 +558,8 @@ export async function prepareIsolatedProviderRun({
       copiedArtifactPaths: bundle.copiedArtifacts,
       async finalize() {
         await flush();
+        await removePath(bundle.bundleRoot);
+        await removePath(sandboxRoot);
       }
     };
   }
@@ -585,8 +600,11 @@ export async function prepareIsolatedProviderRun({
     copiedArtifactPaths: bundle.copiedArtifacts,
     async finalize() {
       await flush();
+      await removePath(bundle.bundleRoot);
+      await removePath(sandboxRoot);
     }
   };
+  }
 }
 
 export async function __prepareIsolatedProviderRunForTests(args) {

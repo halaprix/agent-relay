@@ -949,57 +949,61 @@ async function runPlanReview({ projectRoot, beadId, state, config, adapter, env 
       `Dependencies: ${state.issue.dependencies.map((dependency) => `${dependency.id}:${dependency.status}`).join(", ") || "none"}`
     ].join("\n");
     const reviewRoot = await mkdtemp(path.join(os.tmpdir(), `agent-relay-plan-${beadId}-`));
-    const isolated = await prepareIsolatedProviderRun({
-      projectRoot,
-      adapter,
-      config,
-      supervisorEnv: env,
-      providerConfig,
-      beadId,
-      providerName,
-      cwd: reviewRoot,
-      writableRoot: reviewRoot,
-      copiedArtifacts: [
-        {
-          sourcePath: await writeProviderPrompt({
-            projectRoot,
-            beadId,
-            fileName: `plan-spec-${providerName}.txt`,
-            contents: specContents
-          }),
-          fileName: "spec.txt"
-        }
-      ],
-      promptBuilder: (bundle) =>
-        buildPlanReviewPrompt({
-          specArtifactPath: bundle.files.get("spec.txt"),
-          strongReview: policy.strongReviewersOnly,
-          specHash: state.specHash
-        })
-    });
-    const run = await runCommandChecked({
-      config,
-      projectRoot,
-      cwd: isolated.cwd,
-      command: isolated.command,
-      args: isolated.args,
-      env: isolated.env,
-      timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
-      label: `plan-review:${providerName}`,
-      inheritEnv: false,
-      captureViaEnv: isolated.captureViaEnv ?? false,
-      postRun: () => isolated.finalize()
-    });
-    if (run.code !== 0) {
-      continue;
-    }
-    const report = validateReviewReport(parseWorkerReport(run.stdout));
-    assertCommandsAllowed(report.commandsAttempted);
-    const outputPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, `plan-review-${providerName}.json`);
-    await writeJson(outputPath, report);
-    findings.push({ provider: providerName, vendor, report, outputPath });
-    if (findings.length >= policy.reviewVendors) {
-      break;
+    try {
+      const isolated = await prepareIsolatedProviderRun({
+        projectRoot,
+        adapter,
+        config,
+        supervisorEnv: env,
+        providerConfig,
+        beadId,
+        providerName,
+        cwd: reviewRoot,
+        writableRoot: reviewRoot,
+        copiedArtifacts: [
+          {
+            sourcePath: await writeProviderPrompt({
+              projectRoot,
+              beadId,
+              fileName: `plan-spec-${providerName}.txt`,
+              contents: specContents
+            }),
+            fileName: "spec.txt"
+          }
+        ],
+        promptBuilder: (bundle) =>
+          buildPlanReviewPrompt({
+            specArtifactPath: bundle.files.get("spec.txt"),
+            strongReview: policy.strongReviewersOnly,
+            specHash: state.specHash
+          })
+      });
+      const run = await runCommandChecked({
+        config,
+        projectRoot,
+        cwd: isolated.cwd,
+        command: isolated.command,
+        args: isolated.args,
+        env: isolated.env,
+        timeoutMs: providerConfig.timeoutMs || adapter.providers.capabilities[providerName]?.timeoutMs || 1800000,
+        label: `plan-review:${providerName}`,
+        inheritEnv: false,
+        captureViaEnv: isolated.captureViaEnv ?? false,
+        postRun: () => isolated.finalize()
+      });
+      if (run.code !== 0) {
+        continue;
+      }
+      const report = validateReviewReport(parseWorkerReport(run.stdout));
+      assertCommandsAllowed(report.commandsAttempted);
+      const outputPath = path.join(projectStateRoot(projectRoot), "artifacts", beadId, `plan-review-${providerName}.json`);
+      await writeJson(outputPath, report);
+      findings.push({ provider: providerName, vendor, report, outputPath });
+      if (findings.length >= policy.reviewVendors) {
+        break;
+      }
+    } finally {
+      await removePath(reviewRoot);
     }
   }
   if (findings.length < policy.reviewVendors) {

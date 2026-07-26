@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sanitizeIssueForPrompt } from "./sanitize.mjs";
@@ -9,22 +9,30 @@ function runBd(args, env) {
   const command = configured.endsWith(".mjs") || configured.endsWith(".js") ? process.execPath : configured;
   const finalArgs = command === process.execPath && configured !== process.execPath ? [configured, ...args] : args;
   const captureDir = mkdtempSync(path.join(os.tmpdir(), "agent-relay-bd-capture-"));
-  const stdoutPath = path.join(captureDir, "stdout.log");
-  const stderrPath = path.join(captureDir, "stderr.log");
-  const result = spawnSync(command, finalArgs, {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      ...env,
-      AGENT_RELAY_STDOUT_FILE: stdoutPath,
-      AGENT_RELAY_STDERR_FILE: stderrPath
+  try {
+    const stdoutPath = path.join(captureDir, "stdout.log");
+    const stderrPath = path.join(captureDir, "stderr.log");
+    const result = spawnSync(command, finalArgs, {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...env,
+        AGENT_RELAY_STDOUT_FILE: stdoutPath,
+        AGENT_RELAY_STDERR_FILE: stderrPath
+      }
+    });
+    return {
+      status: result.status ?? 1,
+      stdout: result.stdout || readFileSync(stdoutPath, { encoding: "utf8", flag: "a+" }),
+      stderr: result.stderr || readFileSync(stderrPath, { encoding: "utf8", flag: "a+" })
+    };
+  } finally {
+    try {
+      rmSync(captureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // swallow cleanup failures - never mask the original result/error
     }
-  });
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout || readFileSync(stdoutPath, { encoding: "utf8", flag: "a+" }),
-    stderr: result.stderr || readFileSync(stderrPath, { encoding: "utf8", flag: "a+" })
-  };
+  }
 }
 
 function normalizeBdPayload(payload) {

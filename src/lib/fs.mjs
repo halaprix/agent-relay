@@ -1,4 +1,5 @@
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 export async function ensureDir(dirPath) {
@@ -39,8 +40,25 @@ export async function appendJsonl(filePath, value) {
   });
 }
 
+// `maxRetries` covers the case that matters here: a detached provider child that
+// outlives its kill can recreate a capture file between unlink and rmdir, which
+// surfaces as ENOTEMPTY and would otherwise strand the directory. Node retries
+// ENOTEMPTY/EBUSY/EPERM internally with the given backoff.
 export async function removePath(targetPath) {
-  await rm(targetPath, { recursive: true, force: true });
+  await rm(targetPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+// Creates a temp directory under os.tmpdir() with the given prefix, runs
+// fn(dir), and always removes the directory afterward - even if fn throws.
+// The original error (if any) propagates unchanged; cleanup failures are
+// swallowed so they never mask it or fail an otherwise-successful call.
+export async function withTempDir(prefix, fn) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
+  try {
+    return await fn(dir);
+  } finally {
+    await removePath(dir).catch(() => {});
+  }
 }
 
 export async function listFilesRecursive(rootDir, { ignoreDirNames = [] } = {}) {
