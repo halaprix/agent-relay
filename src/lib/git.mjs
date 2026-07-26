@@ -239,44 +239,57 @@ export async function runGit(config, cwd, args, { timeoutMs = 30000 } = {}) {
   });
 }
 
-export async function getGitStatus(config, cwd) {
-  const run = await runGit(config, cwd, config.git?.statusArgs || ["status", "--short"]);
+async function runGitTextOrThrow(config, cwd, args, buildErrorMessage) {
+  const run = await runGit(config, cwd, args);
   if (run.code !== 0) {
-    throw new Error(`git status failed in ${cwd}: ${run.stderr || run.stdout}`);
+    throw new Error(buildErrorMessage(run));
   }
   return run.stdout.trim();
+}
+
+export async function getGitStatus(config, cwd) {
+  return runGitTextOrThrow(config, cwd, config.git?.statusArgs || ["status", "--short"], (run) =>
+    `git status failed in ${cwd}: ${run.stderr || run.stdout}`
+  );
 }
 
 export async function getGitRemotes(config, cwd) {
-  const run = await runGit(config, cwd, ["remote", "-v"]);
-  if (run.code !== 0) {
-    throw new Error(`git remote -v failed in ${cwd}: ${run.stderr || run.stdout}`);
-  }
-  return run.stdout.trim();
+  return runGitTextOrThrow(config, cwd, ["remote", "-v"], (run) =>
+    `git remote -v failed in ${cwd}: ${run.stderr || run.stdout}`
+  );
 }
 
 export async function getGitHead(config, cwd) {
-  const run = await runGit(config, cwd, ["rev-parse", "HEAD"]);
-  if (run.code !== 0) {
-    throw new Error(`git rev-parse HEAD failed in ${cwd}: ${run.stderr || run.stdout}`);
-  }
-  return run.stdout.trim();
+  return runGitTextOrThrow(config, cwd, ["rev-parse", "HEAD"], (run) =>
+    `git rev-parse HEAD failed in ${cwd}: ${run.stderr || run.stdout}`
+  );
 }
 
 export async function getGitBranch(config, cwd) {
-  const run = await runGit(config, cwd, ["symbolic-ref", "--short", "HEAD"]);
-  if (run.code !== 0) {
-    throw new Error(`git symbolic-ref failed in ${cwd}: ${run.stderr || run.stdout}`);
-  }
-  return run.stdout.trim();
+  return runGitTextOrThrow(config, cwd, ["symbolic-ref", "--short", "HEAD"], (run) =>
+    `git symbolic-ref failed in ${cwd}: ${run.stderr || run.stdout}`
+  );
 }
 
 export async function resolveBaseSha(config, projectRoot, baseBranch) {
-  const run = await runGit(config, projectRoot, ["rev-parse", `origin/${baseBranch}`]);
+  return runGitTextOrThrow(config, projectRoot, ["rev-parse", `origin/${baseBranch}`], (run) =>
+    `git rev-parse failed for ${baseBranch}: ${run.stderr || run.stdout}`
+  );
+}
+
+export async function runGitText(config, cwd, args) {
+  const run = await runProviderCommand({
+    providerName: `git:${args.join(" ")}`,
+    command: config.git.command,
+    args,
+    cwd,
+    env: config.git.env || {},
+    timeoutMs: 30000
+  });
   if (run.code !== 0) {
-    throw new Error(`git rev-parse failed for ${baseBranch}: ${run.stderr || run.stdout}`);
+    return "";
   }
-  return run.stdout.trim();
+  return (run.stdout || "").trim();
 }
 
 export async function createDetachedWorktree(config, projectRoot, worktreePath, baseSha, branch) {

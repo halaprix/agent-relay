@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export async function ensureDir(dirPath) {
@@ -22,6 +22,13 @@ export async function readJson(filePath) {
 export async function writeJson(filePath, value) {
   await ensureDir(path.dirname(filePath));
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+export async function writeJsonAtomic(filePath, value) {
+  await ensureDir(path.dirname(filePath));
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await rename(tmpPath, filePath);
 }
 
 export async function appendJsonl(filePath, value) {

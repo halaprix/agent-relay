@@ -1,6 +1,5 @@
 import path from "node:path";
-import { rename, writeFile } from "node:fs/promises";
-import { ensureDir, readJson } from "./fs.mjs";
+import { ensureDir, readJson, writeJsonAtomic } from "./fs.mjs";
 import { acquireLock } from "./lock.mjs";
 import { projectStateRoot, providerHealthPath } from "./paths.mjs";
 
@@ -45,13 +44,6 @@ export async function loadProviderHealth(projectRoot) {
 
 function lockPathFor(projectRoot) {
   return path.join(projectStateRoot(projectRoot), "locks", "provider-health.lock.json");
-}
-
-async function writeJsonAtomic(filePath, value) {
-  await ensureDir(path.dirname(filePath));
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(tmpPath, filePath);
 }
 
 // acquireLock is fail-fast (returns acquired:false on contention rather than

@@ -26,6 +26,25 @@ export function assertOwnedPaths({ ownedPaths, changedPaths, protectedPaths, mod
   }
 }
 
+function scanTextForFindings(relativePath, text) {
+  const findings = [];
+  for (const pattern of ATTRIBUTION_PATTERNS) {
+    if (pattern.test(text)) {
+      findings.push({ file: relativePath, issue: pattern.source });
+    }
+  }
+  const emailMatches = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  for (const match of emailMatches) {
+    if (match === "git@github.com") {
+      continue;
+    }
+    if (!match.endsWith("@example.com")) {
+      findings.push({ file: relativePath, issue: `email:${match}` });
+    }
+  }
+  return findings;
+}
+
 export async function scanPrivacy(rootDir, { ignoreDirNames = REPO_SCAN_IGNORE_DIRS } = {}) {
   const findings = [];
   const files = await listFilesRecursive(rootDir, { ignoreDirNames });
@@ -35,20 +54,7 @@ export async function scanPrivacy(rootDir, { ignoreDirNames = REPO_SCAN_IGNORE_D
     }
     const relativePath = toPosixRelative(rootDir, filePath);
     const text = await readFile(filePath, "utf8").catch(() => "");
-    for (const pattern of ATTRIBUTION_PATTERNS) {
-      if (pattern.test(text)) {
-        findings.push({ file: relativePath, issue: pattern.source });
-      }
-    }
-    const emailMatches = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-    for (const match of emailMatches) {
-      if (match === "git@github.com") {
-        continue;
-      }
-      if (!match.endsWith("@example.com")) {
-        findings.push({ file: relativePath, issue: `email:${match}` });
-      }
-    }
+    findings.push(...scanTextForFindings(relativePath, text));
   }
   return findings;
 }
@@ -58,20 +64,7 @@ export async function scanPrivacyInPaths(rootDir, relativePaths) {
   for (const relativePath of relativePaths) {
     const filePath = path.join(rootDir, relativePath);
     const text = await readFile(filePath, "utf8").catch(() => "");
-    for (const pattern of ATTRIBUTION_PATTERNS) {
-      if (pattern.test(text)) {
-        findings.push({ file: relativePath, issue: pattern.source });
-      }
-    }
-    const emailMatches = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-    for (const match of emailMatches) {
-      if (match === "git@github.com") {
-        continue;
-      }
-      if (!match.endsWith("@example.com")) {
-        findings.push({ file: relativePath, issue: `email:${match}` });
-      }
-    }
+    findings.push(...scanTextForFindings(relativePath, text));
   }
   return findings;
 }

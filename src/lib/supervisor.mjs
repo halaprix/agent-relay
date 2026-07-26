@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readdir, readFile, writeFile, mkdtemp, rename } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import {
   beadsExcludeMarker,
@@ -17,7 +17,7 @@ import {
   rebuildStateFromBeadComments,
   verifyBeadsStore
 } from "./beads.mjs";
-import { ensureDir, pathExists, readJson, writeJson, appendJsonl, removePath, listFilesRecursive } from "./fs.mjs";
+import { ensureDir, pathExists, readJson, writeJson, writeJsonAtomic, appendJsonl, removePath, listFilesRecursive } from "./fs.mjs";
 import {
   buildStagedDiffArtifact,
   buildScopeLockedDiffArtifact,
@@ -29,6 +29,7 @@ import {
   getGitStatus,
   removeWorktree,
   resolveBaseSha,
+  runGitText,
 } from "./git.mjs";
 import { assertCommandsAllowed, assertOwnedPaths, scanPrivacyInPaths } from "./guardrails.mjs";
 import { sha256Json, sha256Text } from "./hash.mjs";
@@ -50,13 +51,6 @@ import { validateReviewReport, validateWorkerReport } from "./validate.mjs";
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-async function writeJsonAtomic(filePath, value) {
-  await ensureDir(path.dirname(filePath));
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(tmpPath, filePath);
 }
 
 function shortSpecHash(specHash) {
@@ -257,6 +251,18 @@ function withProjectBeadsDir(env, adapter, projectRoot) {
   return { ...env, BEADS_DIR: beadsDir };
 }
 
+// Shared preamble for the four bead-scoped entrypoints (plan/run/review/resume): load the
+// adapter, ensure project state, scope env to this project's beads dir, then refuse if beadId
+// names a container rather than a leaf. `gates` (optional beadId) and `cleanupUnlocked`
+// (different shape) do not go through here.
+async function openBeadAction({ projectRoot, adapterName, beadId, env, action }) {
+  const { adapter } = await loadAdapter(adapterName);
+  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
+  env = withProjectBeadsDir(env, adapter, projectRoot);
+  const rejection = rejectContainerBead({ env, adapter, projectRoot, beadId, action });
+  return { adapter, config, env, rejection };
+}
+
 function inheritedBeadsDirIgnored(env, beadsDir) {
   return Boolean(env.BEADS_DIR) && path.resolve(env.BEADS_DIR) !== path.resolve(beadsDir);
 }
@@ -349,21 +355,6 @@ async function sha256Files(rootDir) {
     sections.push(`${path.relative(rootDir, filePath)}:${sha256Text(await readTextIfExists(filePath))}`);
   }
   return sha256Text(sections.join("\n"));
-}
-
-async function runGitText(config, cwd, args) {
-  const run = await runProviderCommand({
-    providerName: `git:${args.join(" ")}`,
-    command: config.git.command,
-    args,
-    cwd,
-    env: config.git.env || {},
-    timeoutMs: 30000
-  });
-  if (run.code !== 0) {
-    return "";
-  }
-  return (run.stdout || "").trim();
 }
 
 async function captureControlPlaneSnapshot(config, projectRoot, worktreePath) {
@@ -1752,13 +1743,11 @@ export async function setup({ projectRoot, adapterName }) {
 }
 
 async function planUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
-  env = withProjectBeadsDir(env, adapter, projectRoot);
-  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "plan" });
-  if (container) {
-    return container;
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "plan" });
+  if (rejection) {
+    return rejection;
   }
+  env = scopedEnv;
   const state = await ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   return ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "plan" });
 }
@@ -1802,13 +1791,11 @@ export async function status({ projectRoot, beadId }) {
 }
 
 async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
-  env = withProjectBeadsDir(env, adapter, projectRoot);
-  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "run" });
-  if (container) {
-    return container;
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "run" });
+  if (rejection) {
+    return rejection;
   }
+  env = scopedEnv;
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "run" });
   if (!planReady.ok) {
@@ -1820,13 +1807,11 @@ async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env
 }
 
 async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
-  env = withProjectBeadsDir(env, adapter, projectRoot);
-  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "review" });
-  if (container) {
-    return container;
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "review" });
+  if (rejection) {
+    return rejection;
   }
+  env = scopedEnv;
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   if (!state.latestDiffArtifact) {
     return result("human-action-required", "review", {
@@ -1927,13 +1912,11 @@ export async function gates({ projectRoot, adapterName, beadId, gateName, env = 
 }
 
 async function resumeUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
-  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
-  env = withProjectBeadsDir(env, adapter, projectRoot);
-  const container = rejectContainerBead({ env, adapter, projectRoot, beadId, action: "resume" });
-  if (container) {
-    return container;
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "resume" });
+  if (rejection) {
+    return rejection;
   }
+  env = scopedEnv;
   let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "resume" });
   if (!planReady.ok) {
