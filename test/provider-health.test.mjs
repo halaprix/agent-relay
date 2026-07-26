@@ -211,6 +211,86 @@ test("recordProviderSample caps unbounded samples at 200 by dropping the oldest"
   assert.equal(record.samples[199].beadId, "seed-200");
 });
 
+test("recordProviderSample caps at 200 samples under a budget and marks the record truncated", async () => {
+  const projectRoot = await createProjectRoot();
+  const windowMs = 1000 * 60 * 60 * 24 * 365; // huge window so nothing ages out
+  const seeded = Array.from({ length: 200 }, (_, index) => ({
+    at: isoAt(index * 1000),
+    beadId: `seed-${index}`,
+    costUsd: 1,
+    measured: true
+  }));
+  await writeJson(providerHealthPath(projectRoot), {
+    version: 1,
+    providers: {
+      anthropic: {
+        samples: seeded,
+        state: "eligible",
+        reason: null,
+        cooledUntil: null,
+        observedAt: NOW
+      }
+    }
+  });
+
+  const newSample = { at: isoAt(200 * 1000), beadId: "seed-200", costUsd: 1, measured: true };
+  const record = await recordProviderSample({
+    projectRoot,
+    providerName: "anthropic",
+    sample: newSample,
+    budget: { windowMs, handoffAt: 1, limitUsd: 100000 },
+    now: isoAt(200 * 1000)
+  });
+
+  assert.equal(record.samples.length, 200);
+  assert.equal(record.samples[0].beadId, "seed-1");
+  assert.equal(record.samples[199].beadId, "seed-200");
+  assert.equal(record.truncated, true);
+});
+
+test("recordProviderSample under a budget that does not exceed the cap leaves the truncation marker off", async () => {
+  const projectRoot = await createProjectRoot();
+  const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 100 };
+  const sample = { at: NOW, beadId: "b1", costUsd: 1, measured: true };
+  const record = await recordProviderSample({ projectRoot, providerName: "anthropic", sample, budget, now: NOW });
+  assert.equal(record.samples.length, 1);
+  assert.notEqual(record.truncated, true);
+});
+
+test("evaluateProvider treats a measured sample missing the budget's field as contributing 0 without throwing", () => {
+  const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 10 };
+  const missingField = { at: isoAt(-500), beadId: "b-missing", measured: true };
+  assert.doesNotThrow(() => {
+    const result = evaluateProvider({ health: { samples: [missingField] }, budget, now: NOW });
+    assert.equal(result.eligible, true);
+    assert.equal(result.state, "eligible");
+  });
+});
+
+test("evaluateProvider keeps excluding unmeasured samples from the spend sum (unchanged behavior)", () => {
+  const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 10 };
+  const unmeasured = { at: isoAt(-500), beadId: "b-unmeasured", costUsd: "abc", measured: false };
+  const result = evaluateProvider({ health: { samples: [unmeasured] }, budget, now: NOW });
+  assert.equal(result.eligible, true);
+  assert.equal(result.state, "eligible");
+});
+
+for (const [label, badValue] of [
+  ["NaN", NaN],
+  ["Infinity", Infinity],
+  ["the string \"abc\"", "abc"],
+  ["null", null]
+]) {
+  test(`evaluateProvider throws a TypeError when a measured sample's budget field is ${label}`, () => {
+    const budget = { windowMs: 1000, handoffAt: 1, limitUsd: 10 };
+    const badSample = { at: isoAt(-500), beadId: "b-bad", costUsd: badValue, measured: true };
+    assert.throws(
+      () => evaluateProvider({ health: { samples: [badSample] }, budget, now: NOW }),
+      TypeError
+    );
+  });
+}
+
 test("loadProviderHealth returns the empty shape for a missing or corrupt file, and recording afterwards succeeds", async () => {
   const projectRoot = await createProjectRoot();
   const missing = await loadProviderHealth(projectRoot);

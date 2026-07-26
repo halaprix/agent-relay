@@ -84,12 +84,30 @@ function budgetField(budget) {
     : { field: "tokens", limit: budget.limitTokens, unit: "tokens" };
 }
 
+function sampleValue(sample, field) {
+  // Field ABSENT (undefined) is intentional: a USD-budget evaluation over a
+  // token-only sample (or vice versa) contributes 0 rather than throwing.
+  const raw = sample[field];
+  if (raw === undefined) {
+    return 0;
+  }
+  // `Number(null)` is 0, which would silently absorb a present-but-null field
+  // the same way NaN/Infinity/strings would, so null must be checked explicitly.
+  const value = raw === null ? NaN : Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new TypeError(
+      `provider-health: non-numeric ${field} ${JSON.stringify(sample[field])} on measured sample`
+    );
+  }
+  return value;
+}
+
 // Window is half-open: (now - windowMs, now]. A sample at exactly now - windowMs
 // has already aged out.
 function contributingSamples({ samples, field, windowStartMs, nowMs }) {
   return samples
     .filter((sample) => sample.measured === true)
-    .map((sample) => ({ atMs: toEpochMs(sample.at), value: Number(sample[field]) || 0 }))
+    .map((sample) => ({ atMs: toEpochMs(sample.at), value: sampleValue(sample, field) }))
     .filter((sample) => sample.atMs > windowStartMs && sample.atMs <= nowMs)
     .sort((a, b) => a.atMs - b.atMs);
 }
@@ -144,10 +162,19 @@ export async function recordProviderSample({ projectRoot, providerName, sample, 
 
     const pruneWindowMs = budget?.windowMs;
     const nowMs = toEpochMs(now);
-    const prunedSamples =
+    const windowPruned =
       typeof pruneWindowMs === "number"
         ? appended.filter((entry) => toEpochMs(entry.at) > nowMs - pruneWindowMs)
-        : appended.slice(-MAX_UNBOUNDED_SAMPLES);
+        : appended;
+    // Always cap to the most recent MAX_UNBOUNDED_SAMPLES entries, even when a
+    // budget window already pruned by age: a high-frequency sampler with a long
+    // windowMs can otherwise grow the ledger unboundedly within the window.
+    // Trade-off: discarding in-window samples here undercounts recorded spend,
+    // which biases toward "eligible" — the unsafe direction for a guardrail —
+    // so we mark the record as truncated whenever this cap actually drops
+    // in-window samples, making the loss visible rather than silent.
+    const prunedSamples = windowPruned.slice(-MAX_UNBOUNDED_SAMPLES);
+    const truncated = windowPruned.length > prunedSamples.length;
 
     const evaluation = budget
       ? evaluateProvider({ health: { samples: prunedSamples }, budget, now })
@@ -158,7 +185,8 @@ export async function recordProviderSample({ projectRoot, providerName, sample, 
       state: evaluation.state,
       reason: evaluation.reason,
       cooledUntil: evaluation.cooledUntil,
-      observedAt: toIso(now)
+      observedAt: toIso(now),
+      ...(truncated ? { truncated: true } : {})
     };
     ledger.providers[providerName] = record;
     await writeJsonAtomic(providerHealthPath(projectRoot), ledger);
