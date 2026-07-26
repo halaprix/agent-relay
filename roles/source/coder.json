@@ -15,17 +15,5 @@
     "Keep the summary concise and factual."
   ],
   "maxTurns": 20,
-  "isolation": "worktree",
-  "claude": {
-    "model": "sonnet",
-    "effort": "medium"
-  },
-  "codex": {
-    "model": "gpt-5.4",
-    "effort": "medium"
-  },
-  "agy": {
-    "model": "default",
-    "effort": "medium"
-  }
+  "isolation": "worktree"
 }

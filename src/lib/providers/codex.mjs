@@ -1,12 +1,12 @@
 import { escapeTomlMultiline, parseTomlRole, renderBody } from "./shared.mjs";
 
-function renderRole(role) {
+function renderRole(role, roleModel) {
   const body = escapeTomlMultiline(renderBody(role));
   return [
     `name = "${role.name}"`,
     `description = "${role.description}"`,
-    `model = "${role.codex.model}"`,
-    `reasoning_effort = "${role.codex.effort}"`,
+    `model = "${roleModel.model}"`,
+    `reasoning_effort = "${roleModel.effort}"`,
     `max_turns = ${role.maxTurns}`,
     "instructions = \"\"\"",
     body,
@@ -22,5 +22,13 @@ export default {
   parseRole: parseTomlRole,
   repoBundleDir: [".codex", "agents"],
   projectDir: [".codex", "agents"],
-  attributionAliases: ["codex"]
+  attributionAliases: ["codex"],
+  // Provider-owned per-role defaults, keyed by canonical role name (see ROLE_ORDER
+  // in constants.mjs). A role source file may still override a single entry; see
+  // resolveRoleModel in roles.mjs for the precedence rule.
+  roleDefaults: {
+    orchestrator: { model: "gpt-5.4", effort: "high" },
+    coder: { model: "gpt-5.4", effort: "medium" },
+    reviewer: { model: "gpt-5.4", effort: "high" }
+  }
 };

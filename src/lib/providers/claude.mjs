@@ -1,12 +1,12 @@
 import { parseFrontmatter, renderBody } from "./shared.mjs";
 
-function renderRole(role) {
+function renderRole(role, roleModel) {
   const frontmatter = [
     "---",
     `name: ${role.name}`,
     `description: ${role.description}`,
-    `model: ${role.claude.model}`,
-    `effort: ${role.claude.effort}`,
+    `model: ${roleModel.model}`,
+    `effort: ${roleModel.effort}`,
     `maxTurns: ${role.maxTurns}`,
     `isolation: ${role.isolation}`,
     "---"
@@ -24,5 +24,13 @@ export default {
   // duplication across roles.mjs/supervisor.mjs hid.
   repoBundleDir: [".claude-plugin", "agents"],
   projectDir: [".claude", "agents"],
-  attributionAliases: ["claude"]
+  attributionAliases: ["claude"],
+  // Provider-owned per-role defaults, keyed by canonical role name (see ROLE_ORDER
+  // in constants.mjs). A role source file may still override a single entry; see
+  // resolveRoleModel in roles.mjs for the precedence rule.
+  roleDefaults: {
+    orchestrator: { model: "sonnet", effort: "high" },
+    coder: { model: "sonnet", effort: "medium" },
+    reviewer: { model: "sonnet", effort: "high" }
+  }
 };

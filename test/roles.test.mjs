@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { loadRoleSpecs, normalizeRoleOutput, renderAgyRole, renderClaudeRole, renderCodexRole } from "../src/lib/roles.mjs";
+import {
+  assertRoleDefaultsComplete,
+  loadRoleSpecs,
+  normalizeRoleOutput,
+  renderAgyRole,
+  renderClaudeRole,
+  renderCodexRole,
+  resolveRoleModel
+} from "../src/lib/roles.mjs";
+import { findProvider } from "../src/lib/providers/index.mjs";
 import { createRepoFixture } from "./helpers.mjs";
 
 test("generated role formats normalize back to the canonical body", async () => {
@@ -35,4 +44,33 @@ test("syncRoleBundles --check fails on tracked drift", async () => {
   });
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /generated role drift detected/);
+});
+
+test("a role source override wins over the provider manifest default", async () => {
+  const provider = findProvider("claude");
+  const [role] = await loadRoleSpecs();
+  const overriddenRole = { ...role, claude: { model: "opus", effort: "low" } };
+  assert.deepEqual(resolveRoleModel(provider, overriddenRole), { model: "opus", effort: "low" });
+  // Sanity check: without the override, the manifest default applies instead.
+  assert.notDeepEqual(resolveRoleModel(provider, role), { model: "opus", effort: "low" });
+});
+
+test("resolveRoleModel fails loudly when a provider manifest is missing roleDefaults for a role", async () => {
+  const [role] = await loadRoleSpecs();
+  const incompleteProvider = { name: "test-provider", roleDefaults: {} };
+  assert.throws(
+    () => resolveRoleModel(incompleteProvider, role),
+    /provider "test-provider" is missing roleDefaults for role "coder"/
+  );
+});
+
+test("assertRoleDefaultsComplete fails loudly at sync time for a provider missing any canonical role", () => {
+  const incompleteProvider = {
+    name: "test-provider",
+    roleDefaults: { orchestrator: { model: "x", effort: "medium" }, coder: { model: "x", effort: "medium" } }
+  };
+  assert.throws(
+    () => assertRoleDefaultsComplete(incompleteProvider),
+    /provider "test-provider" is missing roleDefaults for role "reviewer"/
+  );
 });

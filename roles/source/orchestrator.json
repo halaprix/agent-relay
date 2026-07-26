@@ -16,17 +16,5 @@
     "Never claim success without verified gates or review evidence."
   ],
   "maxTurns": 30,
-  "isolation": "worktree",
-  "claude": {
-    "model": "sonnet",
-    "effort": "high"
-  },
-  "codex": {
-    "model": "gpt-5.4",
-    "effort": "high"
-  },
-  "agy": {
-    "model": "default",
-    "effort": "high"
-  }
+  "isolation": "worktree"
 }

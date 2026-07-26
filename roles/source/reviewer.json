@@ -15,17 +15,5 @@
     "Return a clean verdict only when the evidence supports it."
   ],
   "maxTurns": 20,
-  "isolation": "worktree",
-  "claude": {
-    "model": "sonnet",
-    "effort": "high"
-  },
-  "codex": {
-    "model": "gpt-5.4",
-    "effort": "high"
-  },
-  "agy": {
-    "model": "default",
-    "effort": "high"
-  }
+  "isolation": "worktree"
 }
