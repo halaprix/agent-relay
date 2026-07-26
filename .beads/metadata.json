@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "agent_relay",
+  "project_id": "95934739-db8e-4526-ab76-728910c923f6"
+}
