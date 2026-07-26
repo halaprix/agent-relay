@@ -153,3 +153,58 @@ export async function runProviderCommand({
     });
   });
 }
+
+export const SUPPORTED_PROVIDER_VENDORS = new Set(["anthropic", "openai", "google"]);
+
+export function providerCommandFromConfig(config, providerName) {
+  const provider = config.providers?.[providerName];
+  return provider?.command ? provider : null;
+}
+
+export function providerVendor(providerName, providerConfig) {
+  if (typeof providerConfig?.vendor !== "string" || providerConfig.vendor.trim() === "") {
+    return null;
+  }
+  const vendor = providerConfig.vendor.trim().toLowerCase();
+  return SUPPORTED_PROVIDER_VENDORS.has(vendor) ? vendor : null;
+}
+
+export function providerStrength(providerConfig) {
+  if (typeof providerConfig?.strength !== "string" || providerConfig.strength.trim() === "") {
+    return null;
+  }
+  return providerConfig.strength.trim();
+}
+
+export function validateRuntimeProviderConfig(providerName, providerConfig, { requireReviewMetadata = false } = {}) {
+  if (!providerConfig || typeof providerConfig !== "object") {
+    throw new Error(`provider ${providerName} is misconfigured`);
+  }
+  if (typeof providerConfig.command !== "string" || providerConfig.command.trim() === "") {
+    throw new Error(`provider ${providerName}.command must be a non-empty string`);
+  }
+  if (providerConfig.args !== undefined && (!Array.isArray(providerConfig.args) || providerConfig.args.some((arg) => typeof arg !== "string"))) {
+    throw new Error(`provider ${providerName}.args must be a string array`);
+  }
+  if (providerConfig.env !== undefined && (providerConfig.env === null || typeof providerConfig.env !== "object" || Array.isArray(providerConfig.env))) {
+    throw new Error(`provider ${providerName}.env must be an object`);
+  }
+  if (!providerVendor(providerName, providerConfig)) {
+    throw new Error(`provider ${providerName}.vendor must be configured explicitly to one of ${[...SUPPORTED_PROVIDER_VENDORS].join(", ")}`);
+  }
+  if (providerConfig.runtime !== undefined) {
+    if (providerConfig.runtime === null || typeof providerConfig.runtime !== "object" || Array.isArray(providerConfig.runtime)) {
+      throw new Error(`provider ${providerName}.runtime must be an object`);
+    }
+    if (providerConfig.runtime.readOnlyMounts !== undefined) {
+      if (!Array.isArray(providerConfig.runtime.readOnlyMounts) || providerConfig.runtime.readOnlyMounts.some((mountPath) => typeof mountPath !== "string" || !path.isAbsolute(mountPath))) {
+        throw new Error(`provider ${providerName}.runtime.readOnlyMounts must be an array of absolute paths`);
+      }
+    }
+  }
+  if (requireReviewMetadata) {
+    if (!providerStrength(providerConfig)) {
+      throw new Error(`provider ${providerName}.strength must be configured explicitly for review`);
+    }
+  }
+}
