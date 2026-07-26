@@ -1,3 +1,5 @@
+import { PROVIDERS } from "./providers/index.mjs";
+
 export const EXIT_CLASSES = {
   success: 0,
   "human-action-required": 10,
@@ -18,10 +20,25 @@ export const PROTECTED_COMMAND_PATTERNS = [
   /\bgh\s+/i
 ];
 
+// chatgpt/gemini have no provider module here: neither ships a role bundle, a repo
+// directory, or a renderer/parser, so they don't fit the registry's manifest shape.
+// They are still attribution names the privacy scanner must recognize (a teammate's
+// commit could credit either tool by name without agent-relay ever driving one), so
+// they are kept as extra literal aliases layered on top of the registry-derived
+// provider names rather than force-fit into claude's or codex's manifest (which would
+// incorrectly imply agent-relay treats them as that provider).
+const EXTRA_ATTRIBUTION_ALIASES = ["chatgpt", "gemini"];
+
+const ATTRIBUTION_NAMES = [
+  ...PROVIDERS.flatMap((provider) => provider.attributionAliases),
+  ...EXTRA_ATTRIBUTION_ALIASES
+];
+const ATTRIBUTION_ALTERNATION = ATTRIBUTION_NAMES.join("|");
+
 export const ATTRIBUTION_PATTERNS = [
-  /co-authored-by:\s*(claude|codex|chatgpt|gemini|agy)/i,
-  /generated with (claude|codex|chatgpt|gemini|agy)/i,
-  /authored by (claude|codex|chatgpt|gemini|agy)/i,
+  new RegExp(`co-authored-by:\\s*(${ATTRIBUTION_ALTERNATION})`, "i"),
+  new RegExp(`generated with (${ATTRIBUTION_ALTERNATION})`, "i"),
+  new RegExp(`authored by (${ATTRIBUTION_ALTERNATION})`, "i"),
   /ai[- ]generated/i
 ];
 

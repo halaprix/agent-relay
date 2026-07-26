@@ -47,6 +47,7 @@ import { prepareIsolatedProviderRun } from "./containment.mjs";
 import { classifyProviderFailure, parseWorkerReport, runProviderCommand, providerCommandFromConfig, providerVendor, providerStrength, validateRuntimeProviderConfig } from "./provider.mjs";
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
+import { PROVIDERS } from "./providers/index.mjs";
 import { validateReviewReport, validateWorkerReport } from "./validate.mjs";
 
 function nowIso() {
@@ -152,12 +153,8 @@ function defaultConfig(adapterName, projectRoot) {
     worktreeRoot: path.join(path.dirname(projectRoot), `${path.basename(projectRoot)}-agent-relay-worktrees`),
     correctionLimit: 2,
     planApprovalRiskClasses: ["money-path", "solidity-core", "shared-infrastructure"],
-    providers: {
-      claude: null,
-      codex: null,
-      agy: null
-    },
-    reviewProviders: ["claude", "codex", "agy"],
+    providers: Object.fromEntries(PROVIDERS.map((provider) => [provider.name, null])),
+    reviewProviders: PROVIDERS.map((provider) => provider.name),
     pluginMaintenanceMode: false,
     git: {
       command: "git",
@@ -284,19 +281,15 @@ async function ensureProjectState(projectRoot, adapterName, adapter = null) {
 async function syncProjectRoles(projectRoot) {
   const outputs = await syncRoleBundles();
   const syncedRoles = [];
-  const targets = [
-    { provider: "claude", dir: path.join(projectRoot, ".claude", "agents"), ext: "md", key: "claude" },
-    { provider: "codex", dir: path.join(projectRoot, ".codex", "agents"), ext: "toml", key: "codex" },
-    { provider: "agy", dir: path.join(projectRoot, ".agents", "agents"), ext: "md", key: "agy" }
-  ];
-  for (const target of targets) {
-    if (!(await pathExists(path.dirname(target.dir)))) {
+  for (const provider of PROVIDERS) {
+    const dir = path.join(projectRoot, ...provider.projectDir);
+    if (!(await pathExists(path.dirname(dir)))) {
       continue;
     }
-    await ensureDir(target.dir);
+    await ensureDir(dir);
     for (const output of outputs) {
-      const destination = path.join(target.dir, `${output.role}.${target.ext}`);
-      await writeFile(destination, output[target.key], "utf8");
+      const destination = path.join(dir, `${output.role}.${provider.extension}`);
+      await writeFile(destination, output[provider.name], "utf8");
       syncedRoles.push(path.relative(projectRoot, destination));
     }
   }

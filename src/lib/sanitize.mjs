@@ -1,3 +1,5 @@
+import { PROVIDERS } from "./providers/index.mjs";
+
 export function sanitizePromptText(value, { maxLength = 4000 } = {}) {
   const text = String(value ?? "")
     .replace(/\r/g, "")
@@ -7,7 +9,7 @@ export function sanitizePromptText(value, { maxLength = 4000 } = {}) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
 }
 
-const DEFAULT_TEAM_FACING_PROVIDER_NAMES = ["claude", "codex", "agy"];
+const DEFAULT_TEAM_FACING_PROVIDER_NAMES = PROVIDERS.map((provider) => provider.name);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
