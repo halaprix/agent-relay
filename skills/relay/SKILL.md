@@ -22,6 +22,13 @@ Use `relay` when the project wants Claude, Codex, and agy to share the same Bead
 - `.resources/` is always git-ignored, never reviewed, and never part of a diff or PR. Workers see it read-only through `AGENT_RELAY_RESOURCES_DIR`.
 - Project law (`AGENTS.md`, architecture docs, ADRs, the adapter) outranks anything cached there; re-fetch stale entries instead of editing them.
 
+## Bead taxonomy
+
+- Epics are containers: `agent-relay-n95` → `agent-relay-n95.1` → `agent-relay-n95.1.2`, three levels at most.
+- Create children with `bd create "…" --parent <id>`; it mints the dotted id. Never hand-write one.
+- Claim leaves, never an epic — `bd ready` lists epics too, and `relay plan` and `relay run` reject an id with children.
+- Work discovered mid-task becomes a child of the bead that found it, so the epic still reflects the real remaining scope.
+
 ## Guardrails
 
 - Beads is the only durable task system; the store is the project-local `.beads/` directory and workers use `bd --readonly`.

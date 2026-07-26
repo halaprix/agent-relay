@@ -98,6 +98,16 @@ The Beads store is project-local. `adapter.beads.requiredDir` defaults to `.bead
 - Absolute `requiredDir` values still work for projects that genuinely need an external store.
 - `relay doctor` reports `beadsDir`, `beadsTracked`, and `beadsStorePresent`, and fails with `project-misconfigured` when the store is missing so the human can run `bd init --quiet`.
 
+## Bead taxonomy
+
+Work is addressed hierarchically: `agent-relay-n95` is an epic, `agent-relay-n95.1` a task under it, `agent-relay-n95.1.2` a subtask under that. Three levels is the ceiling; anything deeper is a sign the epic wanted splitting.
+
+- **`bd` mints the identifiers.** `bd create "…" -t epic` returns the hash id, and `bd create "…" --parent <id>` appends the next dotted segment. Never hand-write an id.
+- **Only leaves are claimable.** An epic is a container for scope, not a unit of work. `bd ready` will happily list an epic — pick a leaf underneath it instead. Agent Relay enforces this: `relay plan` and `relay run` refuse an id that has children.
+- **Discovered work becomes a child**, not a sibling. If a task turns up something it cannot absorb, the new bead hangs off the bead that found it, so the epic keeps showing the true remaining scope.
+- **Standalone work keeps a flat id.** A lone task does not need a ceremonial epic above it. Promote it to one when it grows children.
+- Epics close on their children through `--waits-for-gate` (`all-children` by default), so an epic left open is a real signal that something under it is unfinished.
+
 ## Beads ownership and recovery
 
 - The neutral supervisor is the only Beads writer. In production Bubblewrap runs, workers receive the project store mounted read-only plus a read-only `bd` executable for `bd --readonly ...`; the test-only fallback withholds the Beads store because it lacks OS isolation.

@@ -12,6 +12,7 @@ Operating rules:
 - Pause when the task hits a lasting decision, human-only action, vendor quorum loss, or protected-path exception.
 - Independently rerun gates and reviews before marking any phase complete.
 - Cache external reference material under the git-ignored .resources/ root with recorded provenance, expose it to workers read-only, and never treat it as project law.
+- Claim only leaf Beads; an epic is scope, not work. Create new Beads with `bd create --parent <id>` so the epic.task.subtask identifier is minted for you, and hang discovered work off the Bead that found it.
 
 Report contract:
 - Return machine-readable status, phase, provider, and artifact paths.
