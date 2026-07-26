@@ -28,3 +28,7 @@ export function projectResourcesRoot(projectRoot, resourcesRoot = RESOURCES_DIR_
 export function projectConfigPath(projectRoot) {
   return path.join(projectStateRoot(projectRoot), "config.json");
 }
+
+export function providerHealthPath(projectRoot) {
+  return path.join(projectStateRoot(projectRoot), "provider-health.json");
+}
