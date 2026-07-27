@@ -85,6 +85,29 @@ export function listBeadChildren({ env, beadId, beadsDir = null }) {
   }
 }
 
+// Exports every issue as JSONL on stdout. Deliberately never writes the file: an
+// exported `.beads/issues.jsonl` carries `created_by` identities plus every title,
+// description, and comment, it is not gitignored, and the privacy scanner skips
+// `.beads` - so a file on disk is two blind guards away from a public commit.
+export function exportBeadRecords({ env, beadsDir = null }) {
+  const response = runBd(["export", "--readonly"], beadsDir ? beadsEnv(env, beadsDir) : env);
+  if (response.status !== 0) {
+    throw new Error(`bd export failed: ${response.stderr || response.stdout}`);
+  }
+  const records = [];
+  for (const line of response.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const parsed = JSON.parse(trimmed);
+    if (parsed && parsed.id) {
+      records.push(parsed);
+    }
+  }
+  return records;
+}
+
 export function storePathMatches(resolvedPath, beadsDir) {
   const normalizedStore = path.resolve(beadsDir);
   const normalizedResolved = path.resolve(resolvedPath);

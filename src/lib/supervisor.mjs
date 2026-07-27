@@ -13,6 +13,7 @@ import {
   appendBeadComment,
   approvalForSpecHash,
   epicIdFor,
+  exportBeadRecords,
   listBeadChildren,
   rebuildStateFromBeadComments,
   verifyBeadsStore
@@ -47,6 +48,9 @@ import { prepareIsolatedProviderRun } from "./containment.mjs";
 import { classifyProviderFailure, parseWorkerReport, runProviderCommand, providerCommandFromConfig, providerVendor, providerStrength, validateRuntimeProviderConfig } from "./provider.mjs";
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
+import { buildBeadGraph } from "./bead-graph.mjs";
+import { launchViewer } from "./viewer.mjs";
+import { renderBeadGraphHtml } from "./bead-graph-html.mjs";
 import {
   agentInstructionExcludeMarkers,
   agentInstructionStatus,
@@ -1760,6 +1764,57 @@ async function planUnlocked({ projectRoot, adapterName, beadId, env = process.en
   env = scopedEnv;
   const state = await ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   return ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "plan" });
+}
+
+// Renders the dependency graph from `bd export` output. The export is read from
+// stdout and never written to disk: an `.beads/issues.jsonl` file carries
+// `created_by` identities and is neither gitignored nor covered by the privacy
+// scanner, so keeping it in memory removes the hazard rather than managing it.
+export async function graph({ projectRoot, adapterName, beadId = null, outPath = null, env = process.env }) {
+  const { adapter } = await loadAdapter(adapterName);
+  const beadsDir = resolveBeadsDir(adapter, projectRoot);
+  const records = exportBeadRecords({ env, beadsDir });
+  const model = buildBeadGraph(records, { rootId: beadId });
+  const html = renderBeadGraphHtml(model, {
+    title: beadId ? `${beadId} — bead graph` : "Bead graph",
+    generatedFor: path.basename(projectRoot)
+  });
+  const destination = path.resolve(projectRoot, outPath || path.join(".agents", "agent-relay", "artifacts", beadId ? `graph-${beadId}.html` : "graph.html"));
+  await ensureDir(path.dirname(destination));
+  await writeFile(destination, html, "utf8");
+  return ok("graph", {
+    beadId,
+    outPath: destination,
+    beads: model.nodes.size,
+    edges: model.edges.length,
+    layers: model.layers.map((layer) => layer.length),
+    counts: model.counts,
+    cycleEdges: model.cycleEdges
+  });
+}
+
+// The interactive half of the pair: `relay graph` renders an artifact, `relay view` opens
+// an editor on the same store. Blocks until the human stops the viewer.
+export async function view({ projectRoot, adapterName, beadId = null, port = null, open = true, env = process.env }) {
+  const { adapter } = await loadAdapter(adapterName);
+  const beadsDir = resolveBeadsDir(adapter, projectRoot);
+  if (!(await pathExists(beadsDir))) {
+    return result("project-misconfigured", "view", {
+      error: `missing beads store at ${beadsDir}: run \`bd init --quiet\` in the project root`
+    });
+  }
+  const run = await launchViewer({ beadsDir, cwd: projectRoot, beadId, port, open, env });
+  if (run.error) {
+    return result("project-misconfigured", "view", { error: run.error, beadsDir });
+  }
+  // A non-zero exit is the viewer's own failure to report, not a relay run failure - there
+  // is no bead state to unwind, so it maps to human-action-required rather than a crash.
+  return run.code === 0
+    ? ok("view", { beadsDir, beadId })
+    // Named viewerExitCode, not exitCode: the payload is spread over the result, so
+    // `exitCode` would shadow the exit class's own code and let relay exit outside its
+    // documented set.
+    : result("human-action-required", "view", { beadsDir, beadId, viewerExitCode: run.code });
 }
 
 export async function status({ projectRoot, beadId }) {

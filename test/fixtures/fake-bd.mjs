@@ -53,6 +53,11 @@ if (command === "prime") {
   process.exit(0);
 }
 
+if (command === "export") {
+  out(`${(store.exportRecords || []).map((record) => JSON.stringify(record)).join("\n")}\n`);
+  process.exit(0);
+}
+
 if (command === "list" && args[0] === "--parent") {
   out(`${JSON.stringify((store.children || {})[args[1]] || [])}\n`);
   process.exit(0);

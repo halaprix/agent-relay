@@ -114,6 +114,7 @@ export async function createFakeBdStore({ projectRoot = null, ...overrides } = {
       "example-app-123": []
     },
     children: {},
+    exportRecords: [],
     ...overrides
   };
   for (const [issueId, issue] of Object.entries(store.issues)) {

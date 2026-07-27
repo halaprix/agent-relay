@@ -46,6 +46,8 @@ Version `0.1.0` ships as a local CLI/plugin package only. A transient per-user r
 - `relay run <bead-id>`
 - `relay resume <bead-id>`
 - `relay status [bead-id]`
+- `relay graph [bead-id] [--out path.html]`
+- `relay view [bead-id] [--port n] [--no-open]`
 - `relay review <bead-id>`
 - `relay gates <bead-id> [gate-name]`
 - `relay cleanup <bead-id>`
@@ -99,6 +101,32 @@ Every assistant reads project law from a file in the repository root, and each o
 They stay local and uncommitted on purpose: they name per-machine tooling and model choices, and a project's rules are not Agent Relay's to version. That also means `git clean -xfd` deletes them, so treat the templates as the recovery path.
 
 Adopting a project means filling in the placeholders: the architecture documents worth reading, the real gate commands, the invariants a newcomer would violate, and who merges. The template ships the parts that are true everywhere — the inherited-`BEADS_DIR` trap, verify-don't-trust delegation, no AI attribution, and Beads as the only durable task system.
+
+## Bead graph (`relay graph`)
+
+`relay graph` renders the dependency graph as one self-contained HTML file: no scripts, no CDN, no network requests. It opens offline, survives in an archive, and can be published as an Artifact as-is.
+
+The page is computed, not drawn by a model. Identical input produces identical bytes, which is what makes it reviewable and testable — the layout coordinates come from the script, so there is nothing to trust and nothing to drift.
+
+- Nodes are laid out left to right by longest path over ordering edges, so **layer 0 is startable work**. Containment never pushes a child rightward: an epic does not block its own children.
+- Solid arrows are `blocks`; dashed arrows are `parent-child`. `relates-to` is an annotation and draws nothing.
+- A bead id restricts the page to that bead and its descendants; without one the whole store is drawn.
+- A dependency cycle is reported in the page and the beads pinned to layer 0, rather than throwing — `bd` permits a cycle, so refusing to draw would make the store unviewable. `bd dep cycles` names them.
+
+The data comes from `bd export --readonly` read on **stdout and never written to disk**. That is deliberate: an exported `.beads/issues.jsonl` carries `created_by` account names plus every title, description, and comment, it is not covered by `.beads/.gitignore`, and the privacy scanner skips `.beads` — two blind guards on a public repository.
+
+Compared to `bd graph --html`, which loads D3 from `d3js.org` and so needs network access and cannot be archived, this trades interactivity for a file that always works.
+
+## Interactive viewer (`relay view`)
+
+`relay graph` and `relay view` are the two halves of looking at a queue:
+
+- **`relay graph`** writes a self-contained page. Offline, diffable, attachable to a PR, and identical bytes for identical input.
+- **`relay view`** opens [`@halaprix/beads-viewer`](https://www.npmjs.com/package/@halaprix/beads-viewer) on the same store, where the graph is editable — create beads, drag to connect dependencies, change status, and see a terminal `bd` land within about a second.
+
+The viewer is an **optional external tool, never a dependency**. Agent Relay ships zero runtime dependencies and the viewer ships a browser bundle, so `relay view` fetches it through `npx` on demand. Point `AGENT_RELAY_VIEWER_BIN` at a local checkout to use one, or `AGENT_RELAY_VIEWER_PACKAGE` at a fork.
+
+`relay view` resolves the store from the adapter and passes `BEADS_DIR` explicitly rather than letting the viewer discover it. An exported `BEADS_DIR` aimed at another project silently beats repository discovery, and editing the wrong issue database is not a mistake worth risking. A missing store is reported before the viewer launches; a viewer that cannot be run is `project-misconfigured`; a viewer exiting non-zero is `human-action-required`.
 
 ## Beads store
 
