@@ -47,6 +47,7 @@ Version `0.1.0` ships as a local CLI/plugin package only. A transient per-user r
 - `relay resume <bead-id>`
 - `relay status [bead-id]`
 - `relay graph [bead-id] [--out path.html]`
+- `relay view [bead-id] [--port n] [--no-open]`
 - `relay review <bead-id>`
 - `relay gates <bead-id> [gate-name]`
 - `relay cleanup <bead-id>`
@@ -115,6 +116,17 @@ The page is computed, not drawn by a model. Identical input produces identical b
 The data comes from `bd export --readonly` read on **stdout and never written to disk**. That is deliberate: an exported `.beads/issues.jsonl` carries `created_by` account names plus every title, description, and comment, it is not covered by `.beads/.gitignore`, and the privacy scanner skips `.beads` — two blind guards on a public repository.
 
 Compared to `bd graph --html`, which loads D3 from `d3js.org` and so needs network access and cannot be archived, this trades interactivity for a file that always works.
+
+## Interactive viewer (`relay view`)
+
+`relay graph` and `relay view` are the two halves of looking at a queue:
+
+- **`relay graph`** writes a self-contained page. Offline, diffable, attachable to a PR, and identical bytes for identical input.
+- **`relay view`** opens [`@halaprix/beads-viewer`](https://www.npmjs.com/package/@halaprix/beads-viewer) on the same store, where the graph is editable — create beads, drag to connect dependencies, change status, and see a terminal `bd` land within about a second.
+
+The viewer is an **optional external tool, never a dependency**. Agent Relay ships zero runtime dependencies and the viewer ships a browser bundle, so `relay view` fetches it through `npx` on demand. Point `AGENT_RELAY_VIEWER_BIN` at a local checkout to use one, or `AGENT_RELAY_VIEWER_PACKAGE` at a fork.
+
+`relay view` resolves the store from the adapter and passes `BEADS_DIR` explicitly rather than letting the viewer discover it. An exported `BEADS_DIR` aimed at another project silently beats repository discovery, and editing the wrong issue database is not a mistake worth risking. A missing store is reported before the viewer launches; a viewer that cannot be run is `project-misconfigured`; a viewer exiting non-zero is `human-action-required`.
 
 ## Beads store
 

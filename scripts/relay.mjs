@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseCliArgs } from "../src/lib/cli.mjs";
-import { doctor, setup, plan, run, resume, status, review, gates, cleanup, graph } from "../src/lib/supervisor.mjs";
+import { doctor, setup, plan, run, resume, status, review, gates, cleanup, graph, view } from "../src/lib/supervisor.mjs";
 import { printResult, result } from "../src/lib/output.mjs";
 
 const parsed = parseCliArgs(process.argv.slice(2));
@@ -26,6 +26,14 @@ async function main() {
         beadId: parsed.positionals[0] || null,
         outPath: typeof parsed.options.out === "string" ? parsed.options.out : null
       });
+    case "view":
+      return view({
+        projectRoot,
+        adapterName,
+        beadId: parsed.positionals[0] || null,
+        port: parsed.options.port ? Number(parsed.options.port) : null,
+        open: parsed.options["no-open"] !== true
+      });
     case "status":
       return status({ projectRoot, beadId: parsed.positionals[0] });
     case "review":
@@ -47,6 +55,7 @@ async function main() {
           "relay resume <bead-id>",
           "relay status [bead-id]",
           "relay graph [bead-id] [--out path.html]",
+          "relay view [bead-id] [--port n] [--no-open]",
           "relay review <bead-id>",
           "relay gates <bead-id> [gate-name]",
           "relay cleanup <bead-id>",

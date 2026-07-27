@@ -49,6 +49,7 @@ import { classifyProviderFailure, parseWorkerReport, runProviderCommand, provide
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
 import { buildBeadGraph } from "./bead-graph.mjs";
+import { launchViewer } from "./viewer.mjs";
 import { renderBeadGraphHtml } from "./bead-graph-html.mjs";
 import {
   agentInstructionExcludeMarkers,
@@ -1790,6 +1791,30 @@ export async function graph({ projectRoot, adapterName, beadId = null, outPath =
     counts: model.counts,
     cycleEdges: model.cycleEdges
   });
+}
+
+// The interactive half of the pair: `relay graph` renders an artifact, `relay view` opens
+// an editor on the same store. Blocks until the human stops the viewer.
+export async function view({ projectRoot, adapterName, beadId = null, port = null, open = true, env = process.env }) {
+  const { adapter } = await loadAdapter(adapterName);
+  const beadsDir = resolveBeadsDir(adapter, projectRoot);
+  if (!(await pathExists(beadsDir))) {
+    return result("project-misconfigured", "view", {
+      error: `missing beads store at ${beadsDir}: run \`bd init --quiet\` in the project root`
+    });
+  }
+  const run = await launchViewer({ beadsDir, cwd: projectRoot, beadId, port, open, env });
+  if (run.error) {
+    return result("project-misconfigured", "view", { error: run.error, beadsDir });
+  }
+  // A non-zero exit is the viewer's own failure to report, not a relay run failure - there
+  // is no bead state to unwind, so it maps to human-action-required rather than a crash.
+  return run.code === 0
+    ? ok("view", { beadsDir, beadId })
+    // Named viewerExitCode, not exitCode: the payload is spread over the result, so
+    // `exitCode` would shadow the exit class's own code and let relay exit outside its
+    // documented set.
+    : result("human-action-required", "view", { beadsDir, beadId, viewerExitCode: run.code });
 }
 
 export async function status({ projectRoot, beadId }) {
