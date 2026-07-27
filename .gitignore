@@ -9,6 +9,14 @@ test-output/
 site/.cache/
 .resources/
 
+# Agent instruction files: per-machine project law, scaffolded by `relay setup`
+# from templates/agent-instructions/. Never committed - they name local tooling.
+# Root-anchored: an unanchored pattern matches at any depth and would also ignore
+# the shipped templates under templates/agent-instructions/.
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

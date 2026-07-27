@@ -86,6 +86,20 @@ Rules:
 
 `relay setup` creates the directory and a `README.md` restating these rules, and `relay doctor` reports `resourcesRoot` plus whether it is actually ignored.
 
+## Agent instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`)
+
+Every assistant reads project law from a file in the repository root, and each one looks for a different name. Agent Relay ships one layered set so the law is written once:
+
+- `AGENTS.md` is canonical and holds every shared convention. Codex and opencode read it natively.
+- `CLAUDE.md` and `GEMINI.md` import it (`@AGENTS.md`) and carry only assistant-specific mechanics.
+- Shared conventions are edited in `AGENTS.md` and nowhere else. Duplicating them into the per-assistant files is how they drift.
+
+`relay setup` writes any of the three that are missing from the templates in `templates/agent-instructions/`, and adds all three to the project's local Git exclude state. An existing file is never touched — by then it is the project's own law, and a template is only a starting point. `relay doctor` reports which are present.
+
+They stay local and uncommitted on purpose: they name per-machine tooling and model choices, and a project's rules are not Agent Relay's to version. That also means `git clean -xfd` deletes them, so treat the templates as the recovery path.
+
+Adopting a project means filling in the placeholders: the architecture documents worth reading, the real gate commands, the invariants a newcomer would violate, and who merges. The template ships the parts that are true everywhere — the inherited-`BEADS_DIR` trap, verify-don't-trust delegation, no AI attribution, and Beads as the only durable task system.
+
 ## Beads store
 
 The Beads store is project-local. `adapter.beads.requiredDir` defaults to `.beads`, resolved against the project root, which is exactly where `bd init` creates the embedded Dolt database (`.beads/embeddeddolt/`). Nothing depends on a shared or per-user store.

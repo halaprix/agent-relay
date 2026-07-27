@@ -186,6 +186,53 @@ test("setup writes local state, syncs roles, and marks .agents/agent-relay ignor
   assert.equal(claudeLaw.trim(), "# Fixture CLAUDE");
 });
 
+test("setup scaffolds missing agent instruction files, keeps existing ones, and excludes all of them", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  // The fixture models a project that already has its own law: all three files
+  // exist, so none may be rewritten.
+  const existing = await setup({ projectRoot, adapterName: "example-app" });
+  assert.equal(existing.ok, true);
+  assert.deepEqual(existing.agentInstructions.written, []);
+  assert.deepEqual(existing.agentInstructions.preserved, ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]);
+  assert.equal(
+    (await readFile(path.join(projectRoot, "CLAUDE.md"), "utf8")).trim(),
+    "# Fixture CLAUDE"
+  );
+
+  // A project with none of them gets all three from the shipped templates.
+  for (const fileName of ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]) {
+    await rm(path.join(projectRoot, fileName));
+  }
+  const result = await setup({ projectRoot, adapterName: "example-app" });
+  assert.deepEqual(result.agentInstructions.written, ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]);
+  assert.deepEqual(result.agentInstructions.preserved, []);
+
+  const agentsLaw = await readFile(path.join(projectRoot, "AGENTS.md"), "utf8");
+  assert.match(agentsLaw, /single source of truth/);
+  // The template must warn about the inherited-BEADS_DIR trap: it silently routes
+  // every bd call into another project's store.
+  assert.match(agentsLaw, /BEADS_DIR/);
+  assert.match(await readFile(path.join(projectRoot, "GEMINI.md"), "utf8"), /@\.\/AGENTS\.md/);
+
+  // Root-anchored entries: a bare `AGENTS.md` would also ignore a package-level
+  // AGENTS.md that the project legitimately tracks.
+  const exclude = await readFile(path.join(projectRoot, ".git", "info", "exclude"), "utf8");
+  for (const fileName of ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]) {
+    assert.match(exclude, new RegExp(`^/${fileName.replace(".", "\\.")}$`, "m"));
+  }
+
+  // A rerun neither rewrites a file nor duplicates an exclude entry.
+  await writeFile(path.join(projectRoot, "AGENTS.md"), "# Edited by the project\n", "utf8");
+  const rerun = await setup({ projectRoot, adapterName: "example-app" });
+  assert.deepEqual(rerun.agentInstructions.written, []);
+  assert.equal(
+    await readFile(path.join(projectRoot, "AGENTS.md"), "utf8"),
+    "# Edited by the project\n"
+  );
+  const excludeAfter = await readFile(path.join(projectRoot, ".git", "info", "exclude"), "utf8");
+  assert.equal(excludeAfter.split("\n").filter((line) => line === "/AGENTS.md").length, 1);
+});
+
 test("setup creates the ignored reference cache and the project-local beads exclude entry", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   const result = await setup({ projectRoot, adapterName: "example-app" });
@@ -277,6 +324,10 @@ test("doctor honors the requested adapter and validates required files", { timeo
   assert.equal(result.beadsStorePresent, true);
   assert.equal(result.resourcesIgnored, true);
   assert.equal(result.inheritedBeadsDirIgnored, false);
+  assert.deepEqual(result.agentInstructions, {
+    present: ["AGENTS.md", "CLAUDE.md", "GEMINI.md"],
+    missing: []
+  });
 });
 
 test("doctor reports a missing project-local beads store and an ignored global BEADS_DIR", { timeout: 10000 }, async () => {
