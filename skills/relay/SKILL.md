@@ -16,6 +16,13 @@ Use `relay` when the project wants Claude, Codex, and agy to share the same Bead
 5. Inspect checkpoints with `relay status [bead-id]`, `relay review <bead-id>`, and `relay gates <bead-id> [gate-name]`.
 6. Use `relay cleanup <bead-id>` only after the human has reviewed the retained worktree state.
 
+## Agent instruction files
+
+- Project law lives in `AGENTS.md` at the repository root; `CLAUDE.md` and `GEMINI.md` import it and add only assistant-specific mechanics. Codex and opencode read `AGENTS.md` natively.
+- `relay setup` scaffolds any that are missing from `templates/agent-instructions/` and keeps all three out of Git. It never overwrites an existing file.
+- Edit shared conventions in `AGENTS.md` only. A convention copied into a per-assistant file will drift from the canonical one.
+- Fill in the template placeholders before relying on them: architecture documents, gate commands, the invariants specific to the project, and the branch and merge rules.
+
 ## Reference resources
 
 - Cache external documentation under the repository-root `.resources/` directory, one topic per subdirectory with a `SOURCE.md` naming the origin URL and fetch date.

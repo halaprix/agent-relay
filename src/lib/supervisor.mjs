@@ -47,6 +47,11 @@ import { prepareIsolatedProviderRun } from "./containment.mjs";
 import { classifyProviderFailure, parseWorkerReport, runProviderCommand, providerCommandFromConfig, providerVendor, providerStrength, validateRuntimeProviderConfig } from "./provider.mjs";
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
+import {
+  agentInstructionExcludeMarkers,
+  agentInstructionStatus,
+  scaffoldAgentInstructions
+} from "./agent-instructions.mjs";
 import { PROVIDERS } from "./providers/index.mjs";
 import { validateReviewReport, validateWorkerReport } from "./validate.mjs";
 
@@ -272,7 +277,12 @@ async function ensureProjectState(projectRoot, adapterName, adapter = null) {
   const config = await readProjectConfig(projectRoot, adapterName);
   const resourcesRootName = resolveResourcesRootName(adapter);
   const resourcesRoot = await ensureResourcesRoot(projectRoot, resourcesRootName);
-  const markers = [".agents/agent-relay/", `${resourcesRootName}/`, beadsExcludeMarker(adapter)].filter(Boolean);
+  const markers = [
+    ".agents/agent-relay/",
+    `${resourcesRootName}/`,
+    beadsExcludeMarker(adapter),
+    ...agentInstructionExcludeMarkers()
+  ].filter(Boolean);
   const excludePath = await ensureGitExclude(projectRoot, markers);
   const beadsDir = adapter ? resolveBeadsDir(adapter, projectRoot) : null;
   return { config, excludePath, stateRoot, resourcesRoot, resourcesRootName, beadsDir };
@@ -1702,7 +1712,8 @@ export async function doctor({ projectRoot, adapterName = "example-app", env = p
     beadsTracked: beadsStoreIsTracked(adapter),
     inheritedBeadsDirIgnored: inheritedBeadsDirIgnored(env, beadsDir),
     roles: roles.length,
-    adapters: adapters.length
+    adapters: adapters.length,
+    agentInstructions: await agentInstructionStatus(projectRoot)
   };
   return problems.length > 0
     ? result("project-misconfigured", "doctor", { problems, ...details })
@@ -1725,6 +1736,7 @@ export async function setup({ projectRoot, adapterName }) {
   const { adapter } = await loadAdapter(adapterName);
   const { config, excludePath, resourcesRoot, beadsDir } = await ensureProjectState(projectRoot, adapterName, adapter);
   const syncedRoles = await syncProjectRoles(projectRoot);
+  const agentInstructions = await scaffoldAgentInstructions(projectRoot);
   return ok("setup", {
     adapter: adapter.name,
     config,
@@ -1735,6 +1747,7 @@ export async function setup({ projectRoot, adapterName }) {
     beadsTracked: beadsStoreIsTracked(adapter),
     beadsStorePresent: await pathExists(beadsDir),
     syncedRoles,
+    agentInstructions,
     localStateRoot: projectStateRoot(projectRoot)
   });
 }
