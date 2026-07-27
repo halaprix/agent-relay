@@ -14,7 +14,8 @@ Use `relay` when the project wants Claude, Codex, and agy to share the same Bead
 3. Plan the target Bead with `relay plan <bead-id>`.
 4. Execute with `relay run <bead-id>` or reattach with `relay resume <bead-id>`.
 5. Inspect checkpoints with `relay status [bead-id]`, `relay review <bead-id>`, and `relay gates <bead-id> [gate-name]`.
-6. Use `relay cleanup <bead-id>` only after the human has reviewed the retained worktree state.
+6. Render the queue with `relay graph [bead-id] [--out path.html]` — a self-contained page, computed by the script rather than drawn by a model, where layer 0 is startable work.
+7. Use `relay cleanup <bead-id>` only after the human has reviewed the retained worktree state.
 
 ## Agent instruction files
 

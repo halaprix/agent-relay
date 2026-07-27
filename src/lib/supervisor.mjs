@@ -13,6 +13,7 @@ import {
   appendBeadComment,
   approvalForSpecHash,
   epicIdFor,
+  exportBeadRecords,
   listBeadChildren,
   rebuildStateFromBeadComments,
   verifyBeadsStore
@@ -47,6 +48,8 @@ import { prepareIsolatedProviderRun } from "./containment.mjs";
 import { classifyProviderFailure, parseWorkerReport, runProviderCommand, providerCommandFromConfig, providerVendor, providerStrength, validateRuntimeProviderConfig } from "./provider.mjs";
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
+import { buildBeadGraph } from "./bead-graph.mjs";
+import { renderBeadGraphHtml } from "./bead-graph-html.mjs";
 import {
   agentInstructionExcludeMarkers,
   agentInstructionStatus,
@@ -1760,6 +1763,33 @@ async function planUnlocked({ projectRoot, adapterName, beadId, env = process.en
   env = scopedEnv;
   const state = await ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
   return ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "plan" });
+}
+
+// Renders the dependency graph from `bd export` output. The export is read from
+// stdout and never written to disk: an `.beads/issues.jsonl` file carries
+// `created_by` identities and is neither gitignored nor covered by the privacy
+// scanner, so keeping it in memory removes the hazard rather than managing it.
+export async function graph({ projectRoot, adapterName, beadId = null, outPath = null, env = process.env }) {
+  const { adapter } = await loadAdapter(adapterName);
+  const beadsDir = resolveBeadsDir(adapter, projectRoot);
+  const records = exportBeadRecords({ env, beadsDir });
+  const model = buildBeadGraph(records, { rootId: beadId });
+  const html = renderBeadGraphHtml(model, {
+    title: beadId ? `${beadId} — bead graph` : "Bead graph",
+    generatedFor: path.basename(projectRoot)
+  });
+  const destination = path.resolve(projectRoot, outPath || path.join(".agents", "agent-relay", "artifacts", beadId ? `graph-${beadId}.html` : "graph.html"));
+  await ensureDir(path.dirname(destination));
+  await writeFile(destination, html, "utf8");
+  return ok("graph", {
+    beadId,
+    outPath: destination,
+    beads: model.nodes.size,
+    edges: model.edges.length,
+    layers: model.layers.map((layer) => layer.length),
+    counts: model.counts,
+    cycleEdges: model.cycleEdges
+  });
 }
 
 export async function status({ projectRoot, beadId }) {

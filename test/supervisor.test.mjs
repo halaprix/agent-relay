@@ -22,6 +22,7 @@ import {
   __setTestIsolationRunnerForTests,
   cleanup,
   doctor,
+  graph,
   gates,
   plan,
   resume,
@@ -313,6 +314,59 @@ test("cleanup records the requested adapter rather than a hardcoded default", { 
   await cleanup({ projectRoot, adapterName: "some-other-adapter", beadId: "example-app-123" }).catch(() => {});
   const written = await readJson(path.join(projectStateRoot(projectRoot), "config.json"));
   assert.equal(written.adapter, "some-other-adapter");
+});
+
+test("graph renders a self-contained page from bd export without writing the export to disk", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const bdStorePath = await createFakeBdStore({
+    projectRoot,
+    exportRecords: [
+      { id: "example-app-1", title: "The epic", status: "open", priority: 2, issue_type: "epic", dependencies: [] },
+      {
+        id: "example-app-1.1",
+        title: "First slice",
+        status: "open",
+        priority: 1,
+        issue_type: "task",
+        dependencies: [{ issue_id: "example-app-1.1", depends_on_id: "example-app-1", type: "parent-child" }]
+      },
+      {
+        id: "example-app-1.2",
+        title: "Second slice",
+        status: "blocked",
+        priority: 0,
+        issue_type: "task",
+        dependencies: [
+          { issue_id: "example-app-1.2", depends_on_id: "example-app-1", type: "parent-child" },
+          { issue_id: "example-app-1.2", depends_on_id: "example-app-1.1", type: "blocks" }
+        ]
+      }
+    ]
+  });
+  const outPath = path.join(projectRoot, "graph.html");
+  const result = await graph({
+    projectRoot,
+    adapterName: "example-app",
+    beadId: "example-app-1",
+    outPath,
+    env: {
+      AGENT_RELAY_BD_BIN: repoPath("test", "fixtures", "fake-bd.mjs"),
+      FAKE_BD_STORE: bdStorePath,
+      PATH: process.env.PATH
+    }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.beads, 3);
+  assert.deepEqual(result.layers, [2, 1]);
+  assert.equal(result.counts.blocked, 1);
+
+  const html = await readFile(outPath, "utf8");
+  assert.match(html, /example-app-1\.2/);
+  assert.doesNotMatch(html, /<script/i);
+
+  // The export must never be materialized: that file carries created_by identities,
+  // is not gitignored, and the privacy scanner skips .beads.
+  assert.equal(await pathExists(path.join(projectRoot, ".beads", "issues.jsonl")), false);
 });
 
 test("doctor honors the requested adapter and validates required files", { timeout: 10000 }, async () => {

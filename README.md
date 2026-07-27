@@ -46,6 +46,7 @@ Version `0.1.0` ships as a local CLI/plugin package only. A transient per-user r
 - `relay run <bead-id>`
 - `relay resume <bead-id>`
 - `relay status [bead-id]`
+- `relay graph [bead-id] [--out path.html]`
 - `relay review <bead-id>`
 - `relay gates <bead-id> [gate-name]`
 - `relay cleanup <bead-id>`
@@ -99,6 +100,21 @@ Every assistant reads project law from a file in the repository root, and each o
 They stay local and uncommitted on purpose: they name per-machine tooling and model choices, and a project's rules are not Agent Relay's to version. That also means `git clean -xfd` deletes them, so treat the templates as the recovery path.
 
 Adopting a project means filling in the placeholders: the architecture documents worth reading, the real gate commands, the invariants a newcomer would violate, and who merges. The template ships the parts that are true everywhere — the inherited-`BEADS_DIR` trap, verify-don't-trust delegation, no AI attribution, and Beads as the only durable task system.
+
+## Bead graph (`relay graph`)
+
+`relay graph` renders the dependency graph as one self-contained HTML file: no scripts, no CDN, no network requests. It opens offline, survives in an archive, and can be published as an Artifact as-is.
+
+The page is computed, not drawn by a model. Identical input produces identical bytes, which is what makes it reviewable and testable — the layout coordinates come from the script, so there is nothing to trust and nothing to drift.
+
+- Nodes are laid out left to right by longest path over ordering edges, so **layer 0 is startable work**. Containment never pushes a child rightward: an epic does not block its own children.
+- Solid arrows are `blocks`; dashed arrows are `parent-child`. `relates-to` is an annotation and draws nothing.
+- A bead id restricts the page to that bead and its descendants; without one the whole store is drawn.
+- A dependency cycle is reported in the page and the beads pinned to layer 0, rather than throwing — `bd` permits a cycle, so refusing to draw would make the store unviewable. `bd dep cycles` names them.
+
+The data comes from `bd export --readonly` read on **stdout and never written to disk**. That is deliberate: an exported `.beads/issues.jsonl` carries `created_by` account names plus every title, description, and comment, it is not covered by `.beads/.gitignore`, and the privacy scanner skips `.beads` — two blind guards on a public repository.
+
+Compared to `bd graph --html`, which loads D3 from `d3js.org` and so needs network access and cannot be archived, this trades interactivity for a file that always works.
 
 ## Beads store
 

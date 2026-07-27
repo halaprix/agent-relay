@@ -17,6 +17,12 @@ site/.cache/
 /CLAUDE.md
 /GEMINI.md
 
+# `bd export -o .beads/issues.jsonl` would land an unignored file holding created_by
+# account names and every bead title, description, and comment - and scan-privacy.mjs
+# skips .beads, so nothing else would catch it. `relay graph` reads the export from
+# stdout instead; this line covers a hand-run export.
+.beads/issues.jsonl
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
