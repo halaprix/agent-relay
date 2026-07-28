@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { chmod, cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { repoPath } from "../src/lib/paths.mjs";
+import { projectStateRoot, repoPath } from "../src/lib/paths.mjs";
 import { writeJson } from "../src/lib/fs.mjs";
 
 // Every fixture directory used by the test suite lives under a single
@@ -66,6 +66,21 @@ export async function createProjectFixture() {
   await writeFile(path.join(projectRoot, ".git", "info", "exclude"), "", "utf8");
   await chmod(path.join(projectRoot, "scripts", "dev", "worktree-setup.sh"), 0o755);
   return projectRoot;
+}
+
+// Writes a project-local adapter at <projectRoot>/.agents/agent-relay/adapter.json - the
+// path agent-relay-ynq added so a project's own adapter can live in its own repository
+// instead of being committed into agent-relay. Cloned from the bundled example-app and
+// given a distinct name by default, specifically so a test using it can prove the real
+// adapter was resolved rather than a hardcoded bundled default.
+export async function writeProjectAdapter(projectRoot, overrides = {}) {
+  const base = JSON.parse(await readFile(repoPath("adapters", "example-app.json"), "utf8"));
+  delete base.$schema;
+  const adapter = { ...base, name: "project-local-adapter", ...overrides };
+  const destination = path.join(projectStateRoot(projectRoot), "adapter.json");
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeJson(destination, adapter);
+  return destination;
 }
 
 export async function seedRelayConfig(projectRoot, config) {

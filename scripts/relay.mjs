@@ -7,22 +7,29 @@ const parsed = parseCliArgs(process.argv.slice(2));
 const projectRoot = process.cwd();
 
 async function main() {
-  const adapterName = parsed.options.adapter || "example-app";
+  // No default here, deliberately: a project that named neither --adapter nor
+  // --adapter-file, and has no <projectRoot>/.agents/agent-relay/adapter.json, gets a
+  // clear project-misconfigured error from resolveAdapter() - never a silent fallback to
+  // the bundled example-app, which would run someone's real project under a stranger's
+  // gates and control-plane paths without them choosing to.
+  const adapterName = parsed.options.adapter || null;
+  const adapterFile = parsed.options["adapter-file"] || null;
   switch (parsed.command) {
     case "setup":
-      return setup({ projectRoot, adapterName });
+      return setup({ projectRoot, adapterName, adapterFile });
     case "doctor":
-      return doctor({ projectRoot, adapterName });
+      return doctor({ projectRoot, adapterName, adapterFile });
     case "plan":
-      return plan({ projectRoot, adapterName, beadId: parsed.positionals[0] });
+      return plan({ projectRoot, adapterName, adapterFile, beadId: parsed.positionals[0] });
     case "run":
-      return run({ projectRoot, adapterName, beadId: parsed.positionals[0] });
+      return run({ projectRoot, adapterName, adapterFile, beadId: parsed.positionals[0] });
     case "resume":
-      return resume({ projectRoot, adapterName, beadId: parsed.positionals[0] });
+      return resume({ projectRoot, adapterName, adapterFile, beadId: parsed.positionals[0] });
     case "graph":
       return graph({
         projectRoot,
         adapterName,
+        adapterFile,
         beadId: parsed.positionals[0] || null,
         outPath: typeof parsed.options.out === "string" ? parsed.options.out : null
       });
@@ -30,6 +37,7 @@ async function main() {
       return view({
         projectRoot,
         adapterName,
+        adapterFile,
         beadId: parsed.positionals[0] || null,
         port: parsed.options.port ? Number(parsed.options.port) : null,
         open: parsed.options["no-open"] !== true
@@ -37,18 +45,18 @@ async function main() {
     case "status":
       return status({ projectRoot, beadId: parsed.positionals[0] });
     case "review":
-      return review({ projectRoot, adapterName, beadId: parsed.positionals[0] });
+      return review({ projectRoot, adapterName, adapterFile, beadId: parsed.positionals[0] });
     case "gates":
-      return gates({ projectRoot, adapterName, beadId: parsed.positionals[0], gateName: parsed.positionals[1] });
+      return gates({ projectRoot, adapterName, adapterFile, beadId: parsed.positionals[0], gateName: parsed.positionals[1] });
     case "cleanup":
-      return cleanup({ projectRoot, adapterName, beadId: parsed.positionals[0] });
+      return cleanup({ projectRoot, adapterName, adapterFile, beadId: parsed.positionals[0] });
     case "sync-adapters":
       return (await import("../src/lib/adapter.mjs")).syncAdapters();
     default:
       return result("project-misconfigured", "relay", {
         error: `unknown command: ${parsed.command || "<none>"}`,
         usage: [
-          "relay setup --adapter example-app",
+          "relay setup [--adapter <bundled-name> | --adapter-file <path>]",
           "relay doctor",
           "relay plan <bead-id>",
           "relay run <bead-id>",
@@ -59,7 +67,11 @@ async function main() {
           "relay review <bead-id>",
           "relay gates <bead-id> [gate-name]",
           "relay cleanup <bead-id>",
-          "relay sync-adapters"
+          "relay sync-adapters",
+          "",
+          "Every command accepts --adapter <bundled-name> or --adapter-file <path>.",
+          "Without either, a project adapter at .agents/agent-relay/adapter.json is used",
+          "if one exists; otherwise this is a clear error, not a silent default."
         ]
       });
   }

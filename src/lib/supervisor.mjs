@@ -2,9 +2,10 @@ import path from "node:path";
 import { readdir, readFile, writeFile, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import {
+  AdapterResolutionError,
   beadsExcludeMarker,
   beadsStoreIsTracked,
-  loadAdapter,
+  resolveAdapter,
   resolveBeadsDir,
   resolveResourcesRootName,
   syncAdapters
@@ -257,16 +258,41 @@ function withProjectBeadsDir(env, adapter, projectRoot) {
   return { ...env, BEADS_DIR: beadsDir };
 }
 
-// Shared preamble for the four bead-scoped entrypoints (plan/run/review/resume): load the
-// adapter, ensure project state, scope env to this project's beads dir, then refuse if beadId
-// names a container rather than a leaf. `gates` (optional beadId) and `cleanupUnlocked`
-// (different shape) do not go through here.
-async function openBeadAction({ projectRoot, adapterName, beadId, env, action }) {
-  const { adapter } = await loadAdapter(adapterName);
+// Resolves the active adapter for one command, mapping a resolution failure onto
+// project-misconfigured rather than letting it fall through to the generic
+// unrecoverable-run-state catch-all in relay.mjs - a missing or misconfigured adapter is
+// exactly the kind of thing a human fixes by running a different command, not a crash.
+async function resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command }) {
+  try {
+    const resolved = await resolveAdapter({ projectRoot, adapterName, adapterFile });
+    return { ok: true, ...resolved };
+  } catch (error) {
+    if (!(error instanceof AdapterResolutionError)) {
+      throw error;
+    }
+    return { ok: false, failure: result("project-misconfigured", command, { error: error.message }) };
+  }
+}
+
+// Shared preamble for the four bead-scoped entrypoints (plan/run/review/resume): resolve
+// the adapter, ensure project state, scope env to this project's beads dir, then refuse if
+// beadId names a container rather than a leaf. `gates` (optional beadId) and
+// `cleanupUnlocked` (different shape) do not go through here.
+async function openBeadAction({ projectRoot, adapterName, adapterFile, beadId, env, action }) {
+  const resolved = await resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command: action });
+  if (!resolved.ok) {
+    return { rejection: resolved.failure };
+  }
+  const { adapter } = resolved;
+  // Downstream code (persisted state, config, audit trail) has always keyed on this
+  // string, and a bundled adapter's file name has always matched its own `.name` field -
+  // so reassigning here to the resolved adapter's own name generalises correctly to a
+  // project or explicit-file adapter without touching anything downstream.
+  adapterName = adapter.name;
   const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
   env = withProjectBeadsDir(env, adapter, projectRoot);
   const rejection = rejectContainerBead({ env, adapter, projectRoot, beadId, action });
-  return { adapter, config, env, rejection };
+  return { adapter, config, env, rejection, adapterName };
 }
 
 function inheritedBeadsDirIgnored(env, beadsDir) {
@@ -1690,8 +1716,13 @@ async function deliverReviewedWork({ projectRoot, beadId, state, config, adapter
   return ok("review", { state: nextState, prUrl });
 }
 
-export async function doctor({ projectRoot, adapterName = "example-app", env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
+export async function doctor({ projectRoot, adapterName = null, adapterFile = null, env = process.env }) {
+  const resolved = await resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command: "doctor" });
+  if (!resolved.ok) {
+    return resolved.failure;
+  }
+  const { adapter, adapterPath, source: adapterSource } = resolved;
+  adapterName = adapter.name;
   const { config, excludePath, resourcesRoot, beadsDir } = await ensureProjectState(projectRoot, adapterName, adapter);
   const roles = await syncRoleBundles({ check: true });
   const adapters = await syncAdapters({ check: true });
@@ -1707,6 +1738,8 @@ export async function doctor({ projectRoot, adapterName = "example-app", env = p
   }
   const details = {
     adapter: adapter.name,
+    adapterPath,
+    adapterSource,
     config,
     excludePath,
     resourcesRoot,
@@ -1736,13 +1769,20 @@ async function resourcesRootIsIgnored(projectRoot, excludePath, resourcesRootNam
   return false;
 }
 
-export async function setup({ projectRoot, adapterName }) {
-  const { adapter } = await loadAdapter(adapterName);
+export async function setup({ projectRoot, adapterName = null, adapterFile = null }) {
+  const resolved = await resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command: "setup" });
+  if (!resolved.ok) {
+    return resolved.failure;
+  }
+  const { adapter, adapterPath, source: adapterSource } = resolved;
+  adapterName = adapter.name;
   const { config, excludePath, resourcesRoot, beadsDir } = await ensureProjectState(projectRoot, adapterName, adapter);
   const syncedRoles = await syncProjectRoles(projectRoot);
   const agentInstructions = await scaffoldAgentInstructions(projectRoot);
   return ok("setup", {
     adapter: adapter.name,
+    adapterPath,
+    adapterSource,
     config,
     configPath: projectConfigPath(projectRoot),
     excludePath,
@@ -1756,13 +1796,18 @@ export async function setup({ projectRoot, adapterName }) {
   });
 }
 
-async function planUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "plan" });
+async function planUnlocked({ projectRoot, adapterName, adapterFile = null, beadId, env = process.env }) {
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, adapterFile, beadId, env, action: "plan" });
   if (rejection) {
     return rejection;
   }
   env = scopedEnv;
-  const state = await ensurePlannedState({ projectRoot, adapterName, beadId, adapter, env, config });
+  // adapterName/adapterFile stay exactly as the caller passed them, since a recursive
+  // re-invocation (elsewhere in this file) must re-resolve the same way, not by the
+  // resolved label - which would not exist as a bundled adapter name for a project or
+  // explicit-file adapter. Only this locally-scoped name is used for persisted state.
+  const resolvedAdapterName = adapter.name;
+  const state = await ensurePlannedState({ projectRoot, adapterName: resolvedAdapterName, beadId, adapter, env, config });
   return ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "plan" });
 }
 
@@ -1770,8 +1815,12 @@ async function planUnlocked({ projectRoot, adapterName, beadId, env = process.en
 // stdout and never written to disk: an `.beads/issues.jsonl` file carries
 // `created_by` identities and is neither gitignored nor covered by the privacy
 // scanner, so keeping it in memory removes the hazard rather than managing it.
-export async function graph({ projectRoot, adapterName, beadId = null, outPath = null, env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
+export async function graph({ projectRoot, adapterName = null, adapterFile = null, beadId = null, outPath = null, env = process.env }) {
+  const resolved = await resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command: "graph" });
+  if (!resolved.ok) {
+    return resolved.failure;
+  }
+  const { adapter } = resolved;
   const beadsDir = resolveBeadsDir(adapter, projectRoot);
   const records = exportBeadRecords({ env, beadsDir });
   const model = buildBeadGraph(records, { rootId: beadId });
@@ -1795,8 +1844,12 @@ export async function graph({ projectRoot, adapterName, beadId = null, outPath =
 
 // The interactive half of the pair: `relay graph` renders an artifact, `relay view` opens
 // an editor on the same store. Blocks until the human stops the viewer.
-export async function view({ projectRoot, adapterName, beadId = null, port = null, open = true, env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
+export async function view({ projectRoot, adapterName = null, adapterFile = null, beadId = null, port = null, open = true, env = process.env }) {
+  const resolved = await resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command: "view" });
+  if (!resolved.ok) {
+    return resolved.failure;
+  }
+  const { adapter } = resolved;
   const beadsDir = resolveBeadsDir(adapter, projectRoot);
   if (!(await pathExists(beadsDir))) {
     return result("project-misconfigured", "view", {
@@ -1855,13 +1908,14 @@ export async function status({ projectRoot, beadId }) {
   return ok("status", { state, ledger });
 }
 
-async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "run" });
+async function runUnlocked({ projectRoot, adapterName, adapterFile = null, beadId, env = process.env }) {
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, adapterFile, beadId, env, action: "run" });
   if (rejection) {
     return rejection;
   }
   env = scopedEnv;
-  let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
+  const resolvedAdapterName = adapter.name;
+  let state = await loadOrRecoverState({ projectRoot, adapterName: resolvedAdapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "run" });
   if (!planReady.ok) {
     return planReady;
@@ -1871,13 +1925,14 @@ async function runUnlocked({ projectRoot, adapterName, beadId, env = process.env
   return executeCoder({ projectRoot, beadId, state, config, adapter, env });
 }
 
-async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "review" });
+async function reviewUnlocked({ projectRoot, adapterName, adapterFile = null, beadId, env = process.env }) {
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, adapterFile, beadId, env, action: "review" });
   if (rejection) {
     return rejection;
   }
   env = scopedEnv;
-  let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
+  const resolvedAdapterName = adapter.name;
+  let state = await loadOrRecoverState({ projectRoot, adapterName: resolvedAdapterName, beadId, adapter, env, config });
   if (!state.latestDiffArtifact) {
     return result("human-action-required", "review", {
       reason: "implementation has not produced a diff artifact yet"
@@ -1947,17 +2002,22 @@ async function reviewUnlocked({ projectRoot, adapterName, beadId, env = process.
       },
       details: { findings: findings.map((item) => ({ provider: item.provider, summary: item.report.summary })) }
     });
-    const rerun = await runUnlocked({ projectRoot, adapterName, beadId, env });
+    const rerun = await runUnlocked({ projectRoot, adapterName, adapterFile, beadId, env });
     if (!rerun.ok) {
       return rerun;
     }
-    return reviewUnlocked({ projectRoot, adapterName, beadId, env });
+    return reviewUnlocked({ projectRoot, adapterName, adapterFile, beadId, env });
   }
   return deliverReviewedWork({ projectRoot, beadId, state, config, adapter, env, reviewFindings: findings });
 }
 
-export async function gates({ projectRoot, adapterName, beadId, gateName, env = process.env }) {
-  const { adapter } = await loadAdapter(adapterName);
+export async function gates({ projectRoot, adapterName = null, adapterFile = null, beadId, gateName, env = process.env }) {
+  const resolved = await resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command: "gates" });
+  if (!resolved.ok) {
+    return resolved.failure;
+  }
+  const { adapter } = resolved;
+  adapterName = adapter.name;
   const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
   env = withProjectBeadsDir(env, adapter, projectRoot);
   const state = beadId
@@ -1976,26 +2036,33 @@ export async function gates({ projectRoot, adapterName, beadId, gateName, env = 
     : ok("gates", { results });
 }
 
-async function resumeUnlocked({ projectRoot, adapterName, beadId, env = process.env }) {
-  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, beadId, env, action: "resume" });
+async function resumeUnlocked({ projectRoot, adapterName, adapterFile = null, beadId, env = process.env }) {
+  const { adapter, config, env: scopedEnv, rejection } = await openBeadAction({ projectRoot, adapterName, adapterFile, beadId, env, action: "resume" });
   if (rejection) {
     return rejection;
   }
   env = scopedEnv;
-  let state = await loadOrRecoverState({ projectRoot, adapterName, beadId, adapter, env, config });
+  const resolvedAdapterName = adapter.name;
+  let state = await loadOrRecoverState({ projectRoot, adapterName: resolvedAdapterName, beadId, adapter, env, config });
   const planReady = await ensurePlanReady({ projectRoot, beadId, state, config, adapter, env, action: "resume" });
   if (!planReady.ok) {
     return planReady;
   }
   state = planReady.state;
   if (state.phase === "reviewing" || state.phase === "delivering") {
-    return reviewUnlocked({ projectRoot, adapterName, beadId, env });
+    return reviewUnlocked({ projectRoot, adapterName, adapterFile, beadId, env });
   }
-  return runUnlocked({ projectRoot, adapterName, beadId, env });
+  return runUnlocked({ projectRoot, adapterName, adapterFile, beadId, env });
 }
 
-async function cleanupUnlocked({ projectRoot, adapterName, beadId }) {
-  const { config } = await ensureProjectState(projectRoot, adapterName);
+async function cleanupUnlocked({ projectRoot, adapterName = null, adapterFile = null, beadId }) {
+  const resolved = await resolveAdapterOrFail({ projectRoot, adapterName, adapterFile, command: "cleanup" });
+  if (!resolved.ok) {
+    return resolved.failure;
+  }
+  const { adapter } = resolved;
+  adapterName = adapter.name;
+  const { config } = await ensureProjectState(projectRoot, adapterName, adapter);
   const state = await readJson(runStatePath(projectRoot, beadId));
   if (state.phase !== "complete") {
     return result("human-action-required", "cleanup", {

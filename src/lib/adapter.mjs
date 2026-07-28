@@ -1,15 +1,79 @@
 import path from "node:path";
 import { readFile, readdir } from "node:fs/promises";
 import { RESOURCES_DIR_NAME } from "./constants.mjs";
-import { readJson, writeJson } from "./fs.mjs";
-import { repoPath } from "./paths.mjs";
+import { pathExists, readJson, writeJson } from "./fs.mjs";
+import { projectStateRoot, repoPath } from "./paths.mjs";
 import { assertString, assertStringArray, requireKeys } from "./schema.mjs";
 
+// Loads one of the adapters bundled inside this repository, by name. Kept separate from
+// resolveAdapter() below because syncAdapters/the registry drift check need exactly this -
+// every bundled file, nothing project-specific - and must stay correct regardless of what
+// any given project has configured for itself.
 export async function loadAdapter(adapterName) {
   const adapterPath = repoPath("adapters", `${adapterName}.json`);
   const adapter = await readJson(adapterPath);
   validateAdapter(adapter);
   return { adapter, adapterPath };
+}
+
+export class AdapterResolutionError extends Error {}
+
+export function projectAdapterPath(projectRoot) {
+  return path.join(projectStateRoot(projectRoot), "adapter.json");
+}
+
+async function loadAdapterFromFile(adapterPath, describe) {
+  if (!(await pathExists(adapterPath))) {
+    throw new AdapterResolutionError(`${describe} does not exist: ${adapterPath}`);
+  }
+  const adapter = await readJson(adapterPath);
+  validateAdapter(adapter);
+  return adapter;
+}
+
+/**
+ * Resolves the adapter that governs this run. A project's own configuration is core to
+ * that project, not to Agent Relay, so the project's adapter is meant to live in the
+ * project's own repository - never only inside this one.
+ *
+ * Precedence, most to least specific, and never a silent substitution:
+ *   1. adapterFile   - an explicit path (--adapter-file). Missing is an error naming the path.
+ *   2. adapterName    - an explicit bundled adapter by name (--adapter). Missing is an error
+ *                        naming the bundled path that was not found - never falls through to
+ *                        the project-local file, because an explicit flag is explicit intent.
+ *   3. project-local  - <projectRoot>/.agents/agent-relay/adapter.json, used only when the
+ *                        caller specified neither flag.
+ *   4. Otherwise: a clear, actionable error. Defaulting silently to a bundled example here
+ *      is exactly the failure this function exists to prevent - it would run someone's real
+ *      project under a stranger's gates and control-plane paths without them choosing to.
+ */
+export async function resolveAdapter({ projectRoot, adapterName = null, adapterFile = null } = {}) {
+  if (adapterFile) {
+    const resolvedPath = path.isAbsolute(adapterFile) ? adapterFile : path.resolve(projectRoot, adapterFile);
+    const adapter = await loadAdapterFromFile(resolvedPath, "--adapter-file");
+    return { adapter, adapterPath: resolvedPath, source: "explicit-file" };
+  }
+  if (adapterName) {
+    const bundledPath = repoPath("adapters", `${adapterName}.json`);
+    if (!(await pathExists(bundledPath))) {
+      throw new AdapterResolutionError(
+        `--adapter ${adapterName} is not one of the adapters bundled with Agent Relay (looked for ${bundledPath}). ` +
+          `Use --adapter-file for a project-specific adapter instead.`
+      );
+    }
+    const adapter = await loadAdapterFromFile(bundledPath, "--adapter");
+    return { adapter, adapterPath: bundledPath, source: "bundled" };
+  }
+  const projectPath = projectAdapterPath(projectRoot);
+  if (await pathExists(projectPath)) {
+    const adapter = await loadAdapterFromFile(projectPath, "the project adapter");
+    return { adapter, adapterPath: projectPath, source: "project" };
+  }
+  throw new AdapterResolutionError(
+    `no adapter configured for this project. Create ${projectPath}, or pass --adapter <bundled-name> ` +
+      `or --adapter-file <path>. The bundled examples under adapters/ are documented examples, ` +
+      `not a default that quietly applies to a project that forgot to configure one.`
+  );
 }
 
 function assertRelativeResourcesRoot(resourcesRoot) {

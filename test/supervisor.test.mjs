@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { loadAdapter } from "../src/lib/adapter.mjs";
+import { loadAdapter, syncAdapters } from "../src/lib/adapter.mjs";
 import { acquireLock } from "../src/lib/lock.mjs";
 import { projectStateRoot, repoPath, runStatePath } from "../src/lib/paths.mjs";
 import { pathExists, readJson, removePath } from "../src/lib/fs.mjs";
@@ -42,6 +42,7 @@ import {
   createProjectFixture,
   fixtureDir,
   seedRelayConfig,
+  writeProjectAdapter,
   writeState
 } from "./helpers.mjs";
 
@@ -306,14 +307,27 @@ test("status groups runs under their epic", { timeout: 10000 }, async () => {
   assert.deepEqual(groups["example-app-6st"], ["example-app-6st"]);
 });
 
-test("cleanup records the requested adapter rather than a hardcoded default", { timeout: 10000 }, async () => {
+test("cleanup records the real resolved adapter rather than a hardcoded default", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
-  // cleanup's only use of adapterName is initialising project config, so that write is
-  // where a hardcoded default would show up. It fails afterwards on the missing run
+  // Give the project its own adapter (agent-relay-ynq) with a name distinct from the
+  // bundled example, and pass no --adapter/--adapter-file at all - the only way to prove
+  // this is not hardcoded to "example-app" is to resolve something that genuinely isn't.
+  await writeProjectAdapter(projectRoot, { name: "my-real-project" });
+  // cleanup's only use of the resolved name is initialising project config, so that write
+  // is where a hardcoded default would show up. It fails afterwards on the missing run
   // state, which is expected and not what this test is about.
-  await cleanup({ projectRoot, adapterName: "some-other-adapter", beadId: "example-app-123" }).catch(() => {});
+  await cleanup({ projectRoot, beadId: "example-app-123" }).catch(() => {});
   const written = await readJson(path.join(projectStateRoot(projectRoot), "config.json"));
-  assert.equal(written.adapter, "some-other-adapter");
+  assert.equal(written.adapter, "my-real-project");
+});
+
+test("cleanup refuses an adapter name that resolves to nothing, rather than recording it anyway", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const outcome = await cleanup({ projectRoot, adapterName: "not-a-real-adapter", beadId: "example-app-123" });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.exitClass, "project-misconfigured");
+  assert.match(outcome.error, /not one of the adapters bundled with Agent Relay/);
+  assert.equal(await pathExists(path.join(projectStateRoot(projectRoot), "config.json")), false);
 });
 
 test("graph renders a self-contained page from bd export without writing the export to disk", { timeout: 10000 }, async () => {
@@ -396,6 +410,55 @@ test("doctor reports a missing project-local beads store and an ignored global B
   assert.equal(result.problems.some((problem) => /missing beads store/.test(problem)), true);
   assert.equal(result.problems.some((problem) => /bd init --quiet/.test(problem)), true);
   assert.equal(result.inheritedBeadsDirIgnored, true);
+});
+
+test("agent-relay-ynq: setup and doctor run against an adapter stored in the project's own repository", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  await writeProjectAdapter(projectRoot, { name: "my-real-project" });
+  const projectAdapterFile = path.join(projectStateRoot(projectRoot), "adapter.json");
+
+  // No --adapter, no --adapter-file: this is exactly the "forgot to configure anything
+  // extra" path, and it must still find the project's own adapter rather than erroring or
+  // quietly reaching for the bundled example.
+  const setupResult = await setup({ projectRoot });
+  assert.equal(setupResult.ok, true);
+  assert.equal(setupResult.adapter, "my-real-project");
+  assert.equal(setupResult.adapterSource, "project");
+  assert.equal(setupResult.adapterPath, projectAdapterFile);
+
+  const doctorResult = await doctor({ projectRoot, env: {} });
+  assert.equal(doctorResult.ok, true);
+  assert.equal(doctorResult.adapter, "my-real-project");
+  assert.equal(doctorResult.adapterSource, "project");
+  assert.equal(doctorResult.adapterPath, projectAdapterFile);
+
+  // The bundled registry is a property of this repository, not of any one project's
+  // choice of adapter - it must report exactly the same thing regardless of what the
+  // project across town has configured for itself.
+  const registry = await syncAdapters({ check: true });
+  assert.deepEqual(registry.map((entry) => entry.name), ["example-app"]);
+});
+
+test("agent-relay-ynq: an explicit --adapter-file is honored even when a project adapter also exists", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  await writeProjectAdapter(projectRoot, { name: "the-project-default" });
+  const overridePath = path.join(projectRoot, "staging-adapter.json");
+  const override = JSON.parse(await readFile(path.join(projectStateRoot(projectRoot), "adapter.json"), "utf8"));
+  override.name = "staging-override";
+  await writeFile(overridePath, JSON.stringify(override), "utf8");
+
+  const result = await setup({ projectRoot, adapterFile: overridePath });
+  assert.equal(result.ok, true);
+  assert.equal(result.adapter, "staging-override");
+  assert.equal(result.adapterSource, "explicit-file");
+});
+
+test("agent-relay-ynq: no adapter configured anywhere is project-misconfigured, never a silent bundled default", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const result = await setup({ projectRoot });
+  assert.equal(result.ok, false);
+  assert.equal(result.exitClass, "project-misconfigured");
+  assert.match(result.error, /no adapter configured/);
 });
 
 test("isolated provider runs mount the project reference cache read-only", { timeout: 10000 }, async (t) => {

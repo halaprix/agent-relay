@@ -30,17 +30,18 @@ agy:
 ## Quick start
 
 1. Clone the repository and run `node scripts/sync-roles.mjs` once to materialize provider role bundles.
-2. From the target project root, run `relay setup --adapter example-app`.
-3. Verify the install with `relay doctor --json`.
-4. Plan the Bead with `relay plan <bead-id>`.
-5. Execute or reattach with `relay run <bead-id>` and `relay resume <bead-id>`.
-6. Run `relay review <bead-id>` to obtain vendor review and, when delivery is configured, create the PR.
+2. In the target project, run `bd init --quiet` if it has no Beads store yet, then write `.agents/agent-relay/adapter.json` describing that project (see [Adapters](#adapters) below — `adapters/example-app.json` is a worked template to copy).
+3. From the project root, run `relay setup`. With a project adapter in place this needs no flag; `relay setup --adapter example-app` still works for trying the bundled example itself.
+4. Verify the install with `relay doctor --json`.
+5. Plan the Bead with `relay plan <bead-id>`.
+6. Execute or reattach with `relay run <bead-id>` and `relay resume <bead-id>`.
+7. Run `relay review <bead-id>` to obtain vendor review and, when delivery is configured, create the PR.
 
 Version `0.1.0` ships as a local CLI/plugin package only. A transient per-user relay service is optional future work and is intentionally omitted from the packaged flow.
 
 ## Command surface
 
-- `relay setup --adapter example-app`
+- `relay setup [--adapter <bundled-name> | --adapter-file <path>]`
 - `relay doctor`
 - `relay plan <bead-id>`
 - `relay run <bead-id>`
@@ -62,16 +63,25 @@ All commands return structured JSON and one of these stable exit classes:
 - `project-misconfigured`
 - `unrecoverable-run-state`
 
-## Example adapter
+## Adapters
 
-`adapters/example-app.json` is a worked example, not a real project. It shows the shape an adapter takes; a real one belongs in the repository it describes:
+An adapter is project-specific configuration — worktree bootstrap, gate commands, control-plane paths, risk classes — and a project's own configuration belongs in that project's own repository, not committed into Agent Relay. Every command resolves which adapter governs the run with the same precedence, and never falls back to a bundled example silently:
+
+1. **`--adapter-file <path>`** — an explicit path. Missing is a clear `project-misconfigured` error naming the path, never a fallback.
+2. **`--adapter <name>`** — an explicit bundled adapter by name (`adapters/<name>.json` inside this repository). An unknown name is an error naming what was looked for; it does not fall through to a project adapter, because naming a bundled adapter is explicit intent.
+3. **`<projectRoot>/.agents/agent-relay/adapter.json`** — used when neither flag is given. This is where a real project's adapter lives.
+4. Otherwise: `project-misconfigured`, naming the exact path that was checked. Defaulting silently here would run a real project under a stranger's gates and control-plane paths without anyone choosing that.
+
+`relay doctor` and `relay setup` both report `adapterSource` (`project`, `bundled`, or `explicit-file`) and `adapterPath`, so it is never ambiguous which adapter actually governed a run.
+
+`adapters/example-app.json` is a worked example, not a real project — copy it into `<projectRoot>/.agents/agent-relay/adapter.json`, rename it, and edit the gate commands, control-plane paths, and worktree setup command to match. It shows the shape an adapter takes:
 
 - The Beads store is the project-local `.beads/` directory created by `bd init`; no global store and no machine-specific path is involved.
 - `scripts/dev/worktree-setup.sh` is the required worktree bootstrap command.
 - `AGENTS.md`, architecture docs, and ADRs remain project law.
 - Protected control-plane paths block worker writes unless the run is explicitly in plugin-maintenance mode.
 
-`relay setup` writes only local state beneath `.agents/agent-relay/` plus the ignored `.resources/` cache, adds both to local Git exclude state when available, and synchronizes provider role bundles into existing provider directories. It never overwrites `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `STATE.md`, or architecture documents.
+`relay setup` writes only local state beneath `.agents/agent-relay/` plus the ignored `.resources/` cache, adds both to local Git exclude state when available, and synchronizes provider role bundles into existing provider directories (a provider's own directory — `.claude/`, `.codex/`, `.agents/`, `.opencode/` — must already exist for its role bundles to sync there). It never overwrites `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `STATE.md`, or architecture documents, and it never overwrites an adapter that is already there.
 
 ## Reference resources (`.resources/`)
 

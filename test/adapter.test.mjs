@@ -3,18 +3,22 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
+import { writeJson } from "../src/lib/fs.mjs";
 import { repoPath } from "../src/lib/paths.mjs";
 import {
+  AdapterResolutionError,
   beadsExcludeMarker,
   beadsStoreIsTracked,
   defaultAdapterRegistryPath,
   loadAdapter,
+  projectAdapterPath,
+  resolveAdapter,
   resolveBeadsDir,
   resolveResourcesRootName,
   syncAdapters,
   validateAdapter
 } from "../src/lib/adapter.mjs";
-import { cleanupFixtures, createRepoFixture } from "./helpers.mjs";
+import { cleanupFixtures, createProjectFixture, createRepoFixture, writeProjectAdapter } from "./helpers.mjs";
 
 test.after(cleanupFixtures);
 
@@ -120,4 +124,75 @@ test("npm run check passes from an archive-style checkout without ignored genera
     encoding: "utf8"
   });
   assert.equal(run.status, 0, run.stderr || run.stdout);
+});
+
+// agent-relay-ynq: a project's own adapter is core to that project, not to Agent Relay,
+// so it must be resolvable from the project's own repository rather than only from a
+// file committed into this one. These tests cover the precedence contract directly -
+// see resolveAdapter's own doc comment in src/lib/adapter.mjs for the rule it implements.
+
+test("resolveAdapter finds a project-local adapter when no flag is given", async () => {
+  const projectRoot = await createProjectFixture();
+  const adapterPath = await writeProjectAdapter(projectRoot, { name: "my-real-project" });
+  const resolved = await resolveAdapter({ projectRoot });
+  assert.equal(resolved.source, "project");
+  assert.equal(resolved.adapterPath, adapterPath);
+  assert.equal(resolved.adapter.name, "my-real-project");
+});
+
+test("resolveAdapter never defaults to a bundled example when nothing is configured", async () => {
+  const projectRoot = await createProjectFixture();
+  await assert.rejects(() => resolveAdapter({ projectRoot }), (error) => {
+    assert.ok(error instanceof AdapterResolutionError);
+    assert.match(error.message, /no adapter configured/);
+    assert.ok(
+      error.message.includes(projectAdapterPath(projectRoot)),
+      "the error must name the exact path that was checked"
+    );
+    return true;
+  });
+});
+
+test("resolveAdapter --adapter-file wins over a project-local adapter, and a missing file is a clear error", async () => {
+  const projectRoot = await createProjectFixture();
+  await writeProjectAdapter(projectRoot, { name: "the-project-default" });
+  const explicitPath = path.join(projectRoot, "custom-adapter.json");
+  const explicit = JSON.parse(JSON.stringify((await resolveAdapter({ projectRoot })).adapter));
+  explicit.name = "explicit-file-adapter";
+  await writeJson(explicitPath, explicit);
+
+  const resolved = await resolveAdapter({ projectRoot, adapterFile: explicitPath });
+  assert.equal(resolved.source, "explicit-file");
+  assert.equal(resolved.adapter.name, "explicit-file-adapter");
+
+  await assert.rejects(
+    () => resolveAdapter({ projectRoot, adapterFile: "does-not-exist.json" }),
+    /--adapter-file does not exist/
+  );
+});
+
+test("resolveAdapter --adapter wins over a project-local adapter, and an unknown bundled name is a clear error rather than a fallback", async () => {
+  const projectRoot = await createProjectFixture();
+  await writeProjectAdapter(projectRoot, { name: "the-project-default" });
+
+  const resolved = await resolveAdapter({ projectRoot, adapterName: "example-app" });
+  assert.equal(resolved.source, "bundled");
+  assert.equal(resolved.adapter.name, "example-app");
+
+  // An explicit --adapter names bundled intent specifically - it must not silently fall
+  // through to the project-local file just because that name is not bundled.
+  await assert.rejects(
+    () => resolveAdapter({ projectRoot, adapterName: "not-a-real-bundled-adapter" }),
+    (error) => {
+      assert.ok(error instanceof AdapterResolutionError);
+      assert.match(error.message, /not one of the adapters bundled with Agent Relay/);
+      return true;
+    }
+  );
+});
+
+test("resolveAdapter validates a project-local adapter with the same gate as a bundled one", async () => {
+  const projectRoot = await createProjectFixture();
+  await writeProjectAdapter(projectRoot, { beads: { requiredDir: 5, memoryKey: "x" } });
+  await assert.rejects(() => resolveAdapter({ projectRoot }), /adapter\.beads\.requiredDir must be a/);
 });
