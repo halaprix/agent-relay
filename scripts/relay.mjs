@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseCliArgs } from "../src/lib/cli.mjs";
 import { doctor, setup, plan, run, resume, status, review, gates, cleanup, graph, view } from "../src/lib/supervisor.mjs";
+import { init } from "../src/lib/init.mjs";
 import { printResult, result } from "../src/lib/output.mjs";
 
 const parsed = parseCliArgs(process.argv.slice(2));
@@ -15,6 +16,14 @@ async function main() {
   const adapterName = parsed.options.adapter || null;
   const adapterFile = parsed.options["adapter-file"] || null;
   switch (parsed.command) {
+    case "init":
+      return init({
+        projectRoot,
+        name: typeof parsed.options.name === "string" ? parsed.options.name : null,
+        baseBranch: typeof parsed.options["base-branch"] === "string" ? parsed.options["base-branch"] : null,
+        providers: typeof parsed.options.providers === "string" ? parsed.options.providers.split(",").map((value) => value.trim()) : null,
+        force: parsed.options.force === true
+      });
     case "setup":
       return setup({ projectRoot, adapterName, adapterFile });
     case "doctor":
@@ -56,6 +65,7 @@ async function main() {
       return result("project-misconfigured", "relay", {
         error: `unknown command: ${parsed.command || "<none>"}`,
         usage: [
+          "relay init [--name <slug>] [--base-branch <branch>] [--providers claude,codex,agy] [--force]",
           "relay setup [--adapter <bundled-name> | --adapter-file <path>]",
           "relay doctor",
           "relay plan <bead-id>",

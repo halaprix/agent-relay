@@ -85,6 +85,20 @@ export function listBeadChildren({ env, beadId, beadsDir = null }) {
   }
 }
 
+// An adapter's beads.memoryKey is not optional metadata: verifyBeadsStore hard-refuses
+// every plan/run/resume/review with "required memory key missing" unless a `bd remember`
+// entry under that exact key already exists in the project's store. A freshly generated
+// adapter would therefore be broken on its very first use unless something seeds that
+// memory - this is that something, used by `relay init` right after it writes the
+// adapter, and only when a beads store already exists to seed it into.
+export function rememberProjectMemory({ env, beadsDir, key, content }) {
+  const response = runBd(["remember", content, "--key", key], beadsEnv(env, beadsDir));
+  if (response.status !== 0) {
+    throw new Error(`bd remember failed: ${response.stderr || response.stdout}`);
+  }
+  return response.stdout.trim();
+}
+
 // Exports every issue as JSONL on stdout. Deliberately never writes the file: an
 // exported `.beads/issues.jsonl` carries `created_by` identities plus every title,
 // description, and comment, it is not gitignored, and the privacy scanner skips

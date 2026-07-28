@@ -123,5 +123,20 @@ if (command === "comments" && args[0] === "add") {
   process.exit(0);
 }
 
+if (command === "remember") {
+  const keyIndex = args.indexOf("--key");
+  const key = keyIndex !== -1 ? args[keyIndex + 1] : null;
+  const content = args[0];
+  if (!key || !content) {
+    err("remember requires content and --key\n");
+    process.exit(1);
+  }
+  store.memoriesRemembered ||= [];
+  store.memoriesRemembered.push({ key, content });
+  save();
+  out(`remembered ${key}\n`);
+  process.exit(0);
+}
+
 err(`unsupported fake bd command: ${process.argv.slice(2).join(" ")}\n`);
 process.exit(1);

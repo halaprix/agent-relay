@@ -1,0 +1,410 @@
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdir, readdir, readFile } from "node:fs/promises";
+import { pathExists, writeJson } from "./fs.mjs";
+import { projectAdapterPath } from "./adapter.mjs";
+import { rememberProjectMemory } from "./beads.mjs";
+import { PROVIDERS } from "./providers/index.mjs";
+import { result, ok } from "./output.mjs";
+
+// `relay init` exists so a real project's adapter is authored by detection and a summary
+// to review, never by copying adapters/example-app.json and hand-editing gate commands
+// that came from a project this one is not. It writes the adapter and, when a Beads store
+// is already present, seeds the one memory the adapter requires to actually function -
+// then stops. Applying the result (gates, control-plane paths) is `relay setup`'s job,
+// deliberately a separate, explicit step: the same principle agent-relay-ynq was built on.
+
+const LOCKFILE_MANAGERS = [
+  ["pnpm-lock.yaml", "pnpm"],
+  ["yarn.lock", "yarn"],
+  ["bun.lockb", "bun"],
+  ["package-lock.json", "npm"]
+];
+
+async function detectPackageManager(projectRoot) {
+  for (const [file, manager] of LOCKFILE_MANAGERS) {
+    if (await pathExists(path.join(projectRoot, file))) {
+      return manager;
+    }
+  }
+  return (await pathExists(path.join(projectRoot, "package.json"))) ? "npm" : null;
+}
+
+// Only "dir/*" (one trailing glob segment) is expanded, because that covers the
+// overwhelming majority of real workspace configs without a glob dependency. Anything
+// more exotic is reported as a warning rather than silently mishandled.
+async function expandWorkspaceGlobs(projectRoot, patterns) {
+  const packages = [];
+  const warnings = [];
+  for (const pattern of patterns) {
+    if (typeof pattern !== "string") {
+      continue;
+    }
+    if (!pattern.includes("*")) {
+      packages.push(pattern);
+      continue;
+    }
+    if (!pattern.endsWith("/*")) {
+      warnings.push(`workspace pattern "${pattern}" is not a plain "dir/*" glob and was skipped - add its gate group by hand`);
+      continue;
+    }
+    const base = pattern.slice(0, -2);
+    const baseDir = path.join(projectRoot, base);
+    if (!(await pathExists(baseDir))) {
+      continue;
+    }
+    for (const entry of await readdir(baseDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        packages.push(path.join(base, entry.name));
+      }
+    }
+  }
+  return { packages, warnings };
+}
+
+async function readPackageJson(dir) {
+  const file = path.join(dir, "package.json");
+  if (!(await pathExists(file))) {
+    return null;
+  }
+  try {
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function findFoundryRoots(projectRoot, workspaceDirs) {
+  const roots = [];
+  for (const dir of ["", "contracts", ...workspaceDirs]) {
+    if (await pathExists(path.join(projectRoot, dir, "foundry.toml"))) {
+      roots.push(dir || ".");
+    }
+  }
+  return roots;
+}
+
+function detectBaseBranch(projectRoot) {
+  const tryGit = (args) => {
+    try {
+      // stderr suppressed deliberately: a repository with no remote or no commits yet
+      // fails both probes below by design, and git's own diagnostic text for that
+      // ("fatal: ref ... is not a symbolic ref") would otherwise print straight to the
+      // user's terminal even though the fallback here handles it correctly.
+      return execFileSync("git", args, { cwd: projectRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    } catch {
+      return null;
+    }
+  };
+  const remoteHead = tryGit(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  if (remoteHead) {
+    return remoteHead.replace(/^refs\/remotes\/origin\//, "");
+  }
+  const current = tryGit(["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (current && current !== "HEAD") {
+    return current;
+  }
+  return "main";
+}
+
+export function slugify(value) {
+  const slug = String(value ?? "")
+    .toLowerCase()
+    .replace(/^@/, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "project";
+}
+
+// Pure detection, no writes: everything relay init's summary and adapter are built from.
+export async function detectProjectFacts(projectRoot) {
+  const packageManager = await detectPackageManager(projectRoot);
+  const rootPackageJson = await readPackageJson(projectRoot);
+  const workspacePatterns = Array.isArray(rootPackageJson?.workspaces)
+    ? rootPackageJson.workspaces
+    : Array.isArray(rootPackageJson?.workspaces?.packages)
+      ? rootPackageJson.workspaces.packages
+      : [];
+  const expanded = workspacePatterns.length > 0
+    ? await expandWorkspaceGlobs(projectRoot, workspacePatterns)
+    : { packages: [], warnings: [] };
+
+  const packages = [];
+  const dirsToInspect = expanded.packages.length > 0 ? expanded.packages : rootPackageJson ? [""] : [];
+  for (const dir of dirsToInspect) {
+    const pkg = dir === "" ? rootPackageJson : await readPackageJson(path.join(projectRoot, dir));
+    if (!pkg) {
+      continue;
+    }
+    packages.push({
+      dir: dir === "" ? "." : dir,
+      name: typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : dir || path.basename(projectRoot),
+      scripts: pkg.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {}
+    });
+  }
+
+  // The bare top segment (.claude, .codex, .opencode) is the right signal for the other
+  // three: the README's own instructions have a user `mkdir` it before the role bundles
+  // exist, specifically so relay setup has somewhere to sync into - so requiring the full
+  // path would miss that exact, intended first-run case. agy is the one exception: its
+  // top segment is ".agents", which agent-relay's own local state also lives under
+  // (.agents/agent-relay/) regardless of whether agy is in use at all, so the bare
+  // segment reads as "agy is configured" on every project the moment relay itself has
+  // run once. Only agy is checked by its full path for that reason.
+  const providerDirs = {};
+  for (const provider of PROVIDERS) {
+    const marker = provider.name === "agy" ? provider.projectDir : [provider.projectDir[0]];
+    providerDirs[provider.name] = await pathExists(path.join(projectRoot, ...marker));
+  }
+
+  return {
+    packageManager,
+    packages,
+    foundryRoots: await findFoundryRoots(projectRoot, expanded.packages),
+    providerDirs,
+    beadsStorePresent: await pathExists(path.join(projectRoot, ".beads")),
+    docsArchitecturePresent: await pathExists(path.join(projectRoot, "docs", "architecture")),
+    docsAdrPresent: await pathExists(path.join(projectRoot, "docs", "adr")),
+    agentsFilePresent: await pathExists(path.join(projectRoot, "AGENTS.md")),
+    stateFilePresent: await pathExists(path.join(projectRoot, "STATE.md")),
+    prTemplatePresent: await pathExists(path.join(projectRoot, ".github", "PULL_REQUEST_TEMPLATE.md")),
+    baseBranch: detectBaseBranch(projectRoot),
+    defaultName: slugify(rootPackageJson?.name || path.basename(projectRoot)),
+    warnings: expanded.warnings
+  };
+}
+
+function runArgsFor(manager, scriptName, workspaceName) {
+  switch (manager) {
+    case "pnpm":
+      return workspaceName ? ["pnpm", "--filter", workspaceName, scriptName] : ["pnpm", "run", scriptName];
+    case "yarn":
+      return workspaceName ? ["yarn", "workspace", workspaceName, scriptName] : ["yarn", scriptName];
+    case "bun":
+      return workspaceName ? ["bun", "--filter", workspaceName, "run", scriptName] : ["bun", "run", scriptName];
+    default:
+      return workspaceName ? ["npm", "run", scriptName, "--workspace", workspaceName] : ["npm", "run", scriptName];
+  }
+}
+
+// Builds an adapter object that is guaranteed to pass validateAdapter regardless of how
+// little was detected: every gate list defaults to [], and gates.groups defaults to {} -
+// a project where nothing was found gets an adapter whose gates trivially pass, not one
+// that fails to construct.
+export function buildAdapterFromFacts(facts, { name, baseBranch, providers } = {}) {
+  const resolvedName = slugify(name || facts.defaultName);
+  const resolvedBaseBranch = baseBranch || facts.baseBranch;
+  const explicitProviders = Array.isArray(providers) && providers.length > 0 ? providers : null;
+  const detectedProviders = PROVIDERS.filter((provider) => facts.providerDirs[provider.name]).map((provider) => provider.name);
+  const providerOrder = explicitProviders || (detectedProviders.length > 0 ? detectedProviders : PROVIDERS.map((provider) => provider.name));
+
+  const groups = {};
+  const packageGroupNames = [];
+  const manager = facts.packageManager || "npm";
+  const multiPackage = facts.packages.length > 1;
+  for (const pkg of facts.packages) {
+    if (!pkg.scripts.test) {
+      continue;
+    }
+    const groupName = `${slugify(pkg.name)}-package`;
+    const workspaceArg = multiPackage || pkg.dir !== "." ? pkg.name : null;
+    groups[groupName] = [{ name: `${groupName}-test`, command: runArgsFor(manager, "test", workspaceArg) }];
+    packageGroupNames.push(groupName);
+  }
+
+  const rootPkg = facts.packages.find((pkg) => pkg.dir === ".");
+  const formatting = [];
+  if (rootPkg?.scripts.format) {
+    formatting.push({ name: "format", command: runArgsFor(manager, "format", null) });
+  }
+  if (rootPkg?.scripts.lint) {
+    formatting.push({ name: "lint", command: runArgsFor(manager, "lint", null) });
+  }
+  if (formatting.length > 0) {
+    groups.formatting = formatting;
+  }
+
+  if (facts.foundryRoots.length > 0) {
+    groups.solidity = facts.foundryRoots.flatMap((dir) => {
+      const cwd = dir === "." ? {} : { cwd: dir };
+      return [
+        { name: `forge-build${dir === "." ? "" : `-${slugify(dir)}`}`, ...cwd, command: ["forge", "build"] },
+        { name: `forge-test${dir === "." ? "" : `-${slugify(dir)}`}`, ...cwd, command: ["forge", "test"] }
+      ];
+    });
+  }
+
+  const allPackageAndSolidity = [...packageGroupNames, ...(groups.solidity ? ["solidity"] : [])];
+  const deliveryGroups = [...(formatting.length > 0 ? ["formatting"] : []), ...allPackageAndSolidity];
+
+  const riskClasses = {
+    documentation: { reviewVendors: 1, strongReviewersOnly: false },
+    "normal-code": { reviewVendors: 2, strongReviewersOnly: false }
+  };
+  const deliveryByRisk = {};
+  if (groups.solidity) {
+    riskClasses["solidity-core"] = { reviewVendors: 2, strongReviewersOnly: true };
+    deliveryByRisk["solidity-core"] = deliveryGroups;
+  }
+
+  const protectedPaths = [
+    ".beads",
+    ".github/workflows",
+    ...PROVIDERS.filter((provider) => providerOrder.includes(provider.name)).map((provider) => provider.projectDir[0]),
+    ...(facts.docsArchitecturePresent ? ["docs/architecture"] : []),
+    ...(facts.docsAdrPresent ? ["docs/adr"] : [])
+  ];
+
+  const requiredFiles = [
+    ...(facts.agentsFilePresent ? ["AGENTS.md"] : []),
+    ...(facts.stateFilePresent ? ["STATE.md"] : [])
+  ];
+
+  const humanOnlyActions = [
+    "merge",
+    "destructive-cleanup",
+    "deployment",
+    "access-control-change",
+    ...(groups.solidity ? ["real-chain-write"] : [])
+  ];
+
+  return {
+    name: resolvedName,
+    version: 1,
+    repository: {
+      kind: "git",
+      baseBranch: resolvedBaseBranch,
+      // scripts/dev/worktree-setup.sh is example-app's convention, not a universal one -
+      // a fresh project almost never has this script yet, so this is left as the one
+      // field relay init cannot honestly default to something that works. Flagged in the
+      // summary rather than silently pointing at a script that does not exist.
+      worktreeSetupCommand: ["scripts/dev/worktree-setup.sh"]
+    },
+    beads: {
+      requiredDir: ".beads",
+      tracked: true,
+      memoryKey: `${resolvedName}-agent-relay-bootstrap`
+    },
+    guidance: {
+      requiredFiles,
+      // Unconditional, unlike requiredFiles: a protected-path list is a write-block, not
+      // an existence check, so it is harmless to name a file `relay setup` (or the
+      // project itself) has not created yet - AGENTS.md/CLAUDE.md/GEMINI.md are
+      // scaffolded by `relay setup` regardless.
+      protectedLawFiles: ["AGENTS.md", "CLAUDE.md", "GEMINI.md", "STATE.md"],
+      architectureRoots: [
+        ...(facts.docsArchitecturePresent ? ["docs/architecture"] : []),
+        ...(facts.docsAdrPresent ? ["docs/adr"] : [])
+      ],
+      prTemplate: ".github/PULL_REQUEST_TEMPLATE.md",
+      noAttribution: true
+    },
+    gates: {
+      routing: {
+        planReviewDefault: [],
+        implementationDefault: allPackageAndSolidity,
+        implementationByRisk: { documentation: [] },
+        deliveryDefault: deliveryGroups,
+        deliveryByRisk,
+        deliveryFull: deliveryGroups,
+        humanApproval: []
+      },
+      groups
+    },
+    controlPlane: { protectedPaths },
+    providers: {
+      providerOrder,
+      capabilities: Object.fromEntries(
+        providerOrder.map((name) => [name, { roles: ["orchestrator", "coder", "reviewer"], timeoutMs: 1_800_000 }])
+      )
+    },
+    riskClasses,
+    humanOnlyActions
+  };
+}
+
+function summarize(facts, adapter, { memorySeeded, providerDirsCreated }) {
+  const lines = [];
+  lines.push(`Detected package manager: ${facts.packageManager ?? "none (no package.json found)"}`);
+  if (facts.packages.length > 0) {
+    lines.push(`Detected ${facts.packages.length} package(s) with a test script:`);
+    for (const name of Object.keys(adapter.gates.groups).filter((name) => name.endsWith("-package"))) {
+      lines.push(`  - ${name}`);
+    }
+  } else {
+    lines.push("No package with a `test` script was detected - implementation and delivery gates are empty until you add one.");
+  }
+  if (adapter.gates.groups.solidity) {
+    lines.push(`Detected Foundry at: ${facts.foundryRoots.join(", ")} - added a solidity-core risk class and gate group.`);
+  }
+  lines.push(`Providers: ${adapter.providers.providerOrder.join(", ")}`);
+  if (providerDirsCreated.length > 0) {
+    lines.push(`Created empty provider directories so role bundles have somewhere to sync: ${providerDirsCreated.join(", ")}`);
+  }
+  lines.push(memorySeeded
+    ? `Seeded the required bd memory under key "${adapter.beads.memoryKey}".`
+    : `No Beads store found yet - run \`bd init --quiet\`, then \`bd remember "<content>" --key ${adapter.beads.memoryKey}\` before \`relay setup\`, or relay setup will fail with "required memory key missing".`);
+  lines.push("`repository.worktreeSetupCommand` defaults to scripts/dev/worktree-setup.sh, which almost certainly does not exist yet - create it or edit the adapter before running `relay run`.");
+  if (adapter.guidance.requiredFiles.length === 0) {
+    lines.push("`guidance.requiredFiles` is empty - add AGENTS.md/STATE.md once they exist, so `relay doctor` can verify project law is in place.");
+  }
+  if (!facts.docsArchitecturePresent) {
+    lines.push("No docs/architecture found - `guidance.architectureRoots` is empty until one exists.");
+  }
+  for (const warning of facts.warnings) {
+    lines.push(`Warning: ${warning}`);
+  }
+  lines.push("Only documentation and normal-code risk classes were set (plus solidity-core if Foundry was found). Add money-path or shared-infrastructure yourself if this project needs them - nothing in a repository layout implies those.");
+  return lines;
+}
+
+export async function init({ projectRoot, name = null, baseBranch = null, providers = null, force = false, env = process.env }) {
+  const destination = projectAdapterPath(projectRoot);
+  if (!force && (await pathExists(destination))) {
+    return result("project-misconfigured", "init", {
+      error: `${destination} already exists. Pass --force to overwrite it, or edit it directly.`
+    });
+  }
+
+  const facts = await detectProjectFacts(projectRoot);
+  const adapter = buildAdapterFromFacts(facts, { name, baseBranch, providers });
+
+  const providerDirsCreated = [];
+  if (Array.isArray(providers)) {
+    for (const providerName of providers) {
+      const provider = PROVIDERS.find((candidate) => candidate.name === providerName);
+      if (!provider) {
+        continue;
+      }
+      const dir = path.join(projectRoot, provider.projectDir[0]);
+      if (!(await pathExists(dir))) {
+        await mkdir(dir, { recursive: true });
+        providerDirsCreated.push(provider.projectDir[0]);
+      }
+    }
+  }
+
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeJson(destination, adapter);
+
+  let memorySeeded = false;
+  if (facts.beadsStorePresent) {
+    rememberProjectMemory({
+      env,
+      beadsDir: path.join(projectRoot, ".beads"),
+      key: adapter.beads.memoryKey,
+      content: `This project's Agent Relay adapter (${destination}) was generated by \`relay init\`. Review its gate commands, control-plane paths, and worktree setup command before relying on \`relay setup\`.`
+    });
+    memorySeeded = true;
+  }
+
+  const summary = summarize(facts, adapter, { memorySeeded, providerDirsCreated });
+  return ok("init", {
+    adapterPath: destination,
+    adapter: adapter.name,
+    memorySeeded,
+    providerDirsCreated,
+    summary,
+    nextStep: "review the adapter, then run `relay setup`"
+  });
+}

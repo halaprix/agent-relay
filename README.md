@@ -17,6 +17,14 @@ Neutral supervisor
 
 ## Installation
 
+Make the `relay` command itself available first — `package.json` declares the `bin`, but nothing puts it on `PATH` until you link it once:
+
+```bash
+cd agent-relay && npm link
+```
+
+`relay` then resolves from any directory. Without this step the shell has no way to know `relay` means this tool rather than something else already installed under that name.
+
 Claude:
 - Load the plugin from `.claude-plugin/`, or from the repo-local marketplace entry that resolves to `plugins/agent-relay`.
 
@@ -29,8 +37,8 @@ agy:
 
 ## Quick start
 
-1. Clone the repository and run `node scripts/sync-roles.mjs` once to materialize provider role bundles.
-2. In the target project, run `bd init --quiet` if it has no Beads store yet, then write `.agents/agent-relay/adapter.json` describing that project (see [Adapters](#adapters) below — `adapters/example-app.json` is a worked template to copy).
+1. Clone the repository, run `node scripts/sync-roles.mjs` once to materialize provider role bundles, then `npm link` so the `relay` command itself resolves from any directory.
+2. In the target project, run `bd init --quiet` if it has no Beads store yet, then `relay init [--providers claude,codex,agy]` to write `.agents/agent-relay/adapter.json` from what it can detect (see [Adapters](#adapters) below). Review the summary it prints before continuing.
 3. From the project root, run `relay setup`. With a project adapter in place this needs no flag; `relay setup --adapter example-app` still works for trying the bundled example itself.
 4. Verify the install with `relay doctor --json`.
 5. Plan the Bead with `relay plan <bead-id>`.
@@ -41,6 +49,7 @@ Version `0.1.0` ships as a local CLI/plugin package only. A transient per-user r
 
 ## Command surface
 
+- `relay init [--name <slug>] [--base-branch <branch>] [--providers claude,codex,agy] [--force]`
 - `relay setup [--adapter <bundled-name> | --adapter-file <path>]`
 - `relay doctor`
 - `relay plan <bead-id>`
@@ -74,7 +83,23 @@ An adapter is project-specific configuration — worktree bootstrap, gate comman
 
 `relay doctor` and `relay setup` both report `adapterSource` (`project`, `bundled`, or `explicit-file`) and `adapterPath`, so it is never ambiguous which adapter actually governed a run.
 
-`adapters/example-app.json` is a worked example, not a real project — copy it into `<projectRoot>/.agents/agent-relay/adapter.json`, rename it, and edit the gate commands, control-plane paths, and worktree setup command to match. It shows the shape an adapter takes:
+### `relay init` — write a project's first adapter by detection, not by copying one
+
+`relay init [--name <slug>] [--base-branch <branch>] [--providers claude,codex,agy] [--force]` writes `<projectRoot>/.agents/agent-relay/adapter.json` for the project it runs in, built from what it can actually detect, and stops — it never runs `relay setup` itself, on the same principle the precedence rules above are built on: an adapter's gates and control-plane paths take effect on a real project, and that should never happen without a human (or an explicit second command) choosing it.
+
+What it detects, with no dependency beyond what's already on `PATH`:
+
+- **Package manager and per-package test commands** from the lockfile present (`pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`, `package-lock.json`) and each package's `package.json` `scripts`. A `workspaces` field is expanded for simple `"dir/*"` globs; anything more exotic is named in the summary as skipped, not silently mishandled.
+- **Foundry/Solidity** — a `foundry.toml` anywhere adds a `solidity-core` risk class and a gate group running `forge build`/`forge test` in the right directory.
+- **Providers already in use** — via `--providers`, or detected from existing config directories. `.claude`/`.codex`/`.opencode` are checked by their top-level directory, matching the `mkdir` step below; `agy`'s is checked more specifically (`.agents/agents`), because its top segment (`.agents`) is also where Agent Relay's own local state lives regardless of whether agy is in use.
+- **A Beads store**, and if one already exists, `relay init` seeds the one `bd remember` memory the adapter's `beads.memoryKey` requires — without it, the very first `relay plan`/`run`/`review` fails with "required memory key missing." If no store exists yet, the summary names the exact `bd init`/`bd remember` commands to run first.
+- Existing `docs/architecture`, `docs/adr`, `AGENTS.md`, and `STATE.md`, feeding `guidance.architectureRoots` and `guidance.requiredFiles` — never claiming a file is required when it does not exist yet, since `relay doctor` checks that literally.
+
+What it refuses to guess, on purpose: risk classes beyond `documentation` and `normal-code` (plus `solidity-core` when Foundry is found) — nothing in a repository's file layout implies a `money-path` or `shared-infrastructure` concept, so those are left for a human to add. `repository.worktreeSetupCommand` always defaults to `scripts/dev/worktree-setup.sh`, which a fresh project almost never has yet; the summary says so rather than pretending otherwise. Never overwrites an existing adapter without `--force`.
+
+A project with nothing detectable at all still gets a **valid** adapter — every gate list defaults to `[]` rather than failing to construct, and `providerOrder` defaults to all four providers. Detection never blocks writing something reviewable.
+
+`adapters/example-app.json` remains the reference for what a fully filled-in adapter looks like:
 
 - The Beads store is the project-local `.beads/` directory created by `bd init`; no global store and no machine-specific path is involved.
 - `scripts/dev/worktree-setup.sh` is the required worktree bootstrap command.

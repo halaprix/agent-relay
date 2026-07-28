@@ -9,7 +9,7 @@ Use `relay` when the project wants Claude, Codex, and agy to share the same Bead
 
 ## Workflow
 
-1. Ensure the project has a local Beads store (`bd init --quiet` creates `.beads/`) and its own adapter at `.agents/agent-relay/adapter.json` — copy `adapters/example-app.json` as a starting point and edit its gate commands, control-plane paths, and worktree setup command. Then run `relay setup` from the project root; with that file in place, no `--adapter` flag is needed.
+1. Ensure the project has a local Beads store (`bd init --quiet` creates `.beads/`), then run `relay init [--providers claude,codex,agy]` to write its own adapter at `.agents/agent-relay/adapter.json` by detection — package manager, per-package test commands, Foundry, existing provider directories, an existing Beads store (whose one required memory it also seeds). Review the printed summary, then run `relay setup` from the project root; with that file in place, no `--adapter` flag is needed.
 2. Confirm `relay doctor --json` reports valid manifests, roles, adapters, and local state — including `adapterSource` and `adapterPath`, so it is unambiguous which adapter actually governed the run.
 3. Plan the target Bead with `relay plan <bead-id>`.
 4. Execute with `relay run <bead-id>` or reattach with `relay resume <bead-id>`.
