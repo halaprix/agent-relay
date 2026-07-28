@@ -1275,7 +1275,10 @@ test("delivery uses neutral team-facing text, parses gh stdout URLs, clears dirt
   assert.equal(removed.records.prunes.length, 1);
 });
 
-test("delivery binds the reviewed artifact to the staged index even if the worktree mutates after add", { timeout: 10000 }, async () => {
+// Measured at ~6.3s on a quiet local machine against the 10000ms this file defaults to -
+// the same class of thin margin that let the review-correction test above flake on a
+// slower CI runner. Widened for the same reason, not because this one has failed yet.
+test("delivery binds the reviewed artifact to the staged index even if the worktree mutates after add", { timeout: 20000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
     projectRoot,
@@ -1724,7 +1727,12 @@ test("high-risk plans require matching approval comments and resume advances on 
   assert.equal(coderCalls, 1);
 });
 
-test("review corrections return to the same coder and include consolidated findings in the next prompt", { timeout: 10000 }, async () => {
+// This test drives two full run+review rounds (the correction round-trip), so it costs
+// noticeably more real subprocess time than its 10000ms siblings - it measured 7.3-7.5s
+// on a quiet local machine, already the tightest margin in this file before this comment
+// was added. That marginal budget is what let a normal, unrelated CI-runner slowdown tip
+// it into a timeout. Not a hang: the test passes reliably given headroom.
+test("review corrections return to the same coder and include consolidated findings in the next prompt", { timeout: 30000 }, async () => {
   const projectRoot = await createProjectFixture();
   const bdStorePath = await createFakeBdStore({
     projectRoot,
