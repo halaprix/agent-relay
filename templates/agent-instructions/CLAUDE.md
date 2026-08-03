@@ -6,7 +6,8 @@
 
 # Claude-specific notes
 
-- Run the `AGENTS.md` first-action sequence manually unless a `SessionStart` hook does it for you. If you add such a hook, it must not export `BEADS_DIR` — the store is repository-local and self-discovering, and a global export routes every other project on the machine into this one's store.
+- Run the `AGENTS.md` first-action sequence manually unless a `SessionStart` hook does it for you. `relay setup` writes that hook into `.claude/settings.json` as `BEADS_DIR="$CLAUDE_PROJECT_DIR/.beads" bd prime --hook-json`, and upgrades a bare `bd prime` hook that `bd init` left behind.
+- **Scope `BEADS_DIR` per invocation; never export it globally.** These are opposite things and only one is safe. A prefix assignment on a single command (as in that hook, or `BEADS_DIR="$PWD/.beads" bd where`) pins that one call to this repository and makes an inherited global export harmless. A global export in a shell profile routes every other project on the machine into whichever store it names — which is the exact failure the hook exists to prevent, since a hook fires before any instruction file can be read. Use `$CLAUDE_PROJECT_DIR`, not `$PWD`, inside a hook: a `SessionStart` hook's working directory is wherever the session was invoked, not necessarily the repository root.
 - Keep persistent knowledge in `bd remember`, not in the harness's own memory files, so every assistant shares it.
 
 # Orchestration and delegation

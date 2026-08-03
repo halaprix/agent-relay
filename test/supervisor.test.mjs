@@ -188,6 +188,38 @@ test("setup writes local state, syncs roles, and marks .agents/agent-relay ignor
   assert.equal(claudeLaw.trim(), "# Fixture CLAUDE");
 });
 
+// A SessionStart hook fires before any instruction file is read, so relay setup is the
+// only place that can guarantee it targets this project's store rather than whatever a
+// machine-global BEADS_DIR happens to name.
+test("setup scopes the Claude SessionStart hook to this project's beads store", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  const result = await setup({ projectRoot, adapterName: "example-app" });
+  assert.equal(result.ok, true);
+  const claudeHook = result.sessionHooks.find((record) => record.provider === "claude");
+  assert.equal(claudeHook.action, "added");
+
+  const settings = await readJson(path.join(projectRoot, ".claude", "settings.json"));
+  const command = settings.hooks.SessionStart[0].hooks[0].command;
+  assert.match(command, /^BEADS_DIR="\$CLAUDE_PROJECT_DIR\//);
+  assert.match(command, /bd prime --hook-json$/);
+  // $PWD would be wrong: a SessionStart hook's cwd is the invocation directory, which is
+  // not guaranteed to be the repository root.
+  assert.equal(command.includes("$PWD"), false);
+});
+
+test("setup leaves settings.json alone for a project that does not use Claude", { timeout: 10000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  // The shared fixture ships a .claude/ directory, so it has to be removed to model a
+  // project that genuinely does not use this provider. Absence of the provider's own
+  // directory is the same signal syncProjectRoles keys off.
+  await rm(path.join(projectRoot, ".claude"), { recursive: true, force: true });
+
+  const result = await setup({ projectRoot, adapterName: "example-app" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.sessionHooks, [], "no provider directory means no configuration file");
+  assert.equal(await pathExists(path.join(projectRoot, ".claude")), false, "and none is created");
+});
+
 test("setup scaffolds missing agent instruction files, keeps existing ones, and excludes all of them", { timeout: 10000 }, async () => {
   const projectRoot = await createProjectFixture();
   // The fixture models a project that already has its own law: all three files
@@ -1046,6 +1078,82 @@ test("run retries service failure once, corrects on needs-fix with the same prov
   const claudeCalls = JSON.parse(await readFile(claudeStore, "utf8")).calls.length;
   assert.equal(claudeCalls, 3);
   assert.equal(result.state.latestChangedPaths.includes("src/partial.ts"), true);
+});
+
+// An empty worktreeSetupCommand means "this project has no setup step", which relay init
+// now emits for a repository with no detected package manager. The proof that it is a real
+// no-op rather than a silently-swallowed failure: FAKE_SETUP_FAIL=1 makes the fixture's
+// setup script exit non-zero, so a run that still succeeds is one where it never ran.
+test("run skips worktree setup entirely when the adapter declares no setup command", { timeout: 20000 }, async () => {
+  const projectRoot = await createProjectFixture();
+  await writeProjectAdapter(projectRoot, {
+    name: "no-setup-project",
+    repository: { kind: "git", baseBranch: "dev", worktreeSetupCommand: [] }
+  });
+  // The project adapter keeps example-app's beads block, so the fake store's default
+  // seeded memory already satisfies its required memoryKey.
+  const bdStorePath = await createFakeBdStore({
+    projectRoot,
+    issues: {
+      "example-app-123": {
+        id: "example-app-123",
+        title: "Test bead",
+        description: "Implement the requested change set.",
+        design: "Follow the current architecture and preserve safety boundaries.",
+        acceptance_criteria: "Tests pass and delivery pauses safely when config is missing.",
+        riskClass: "documentation",
+        dependencies: [],
+        claimed: false,
+        claimConflict: false
+      }
+    }
+  });
+  const gitStorePath = await createFakeGitStore(projectRoot);
+  const gateStorePath = await createFakeGateStore([{ ok: true }, { ok: true }, { ok: true }, { ok: true }, { ok: true }]);
+  const shimDir = await createGateShimPath();
+  const providerStorePath = await createFakeProviderStore([
+    {
+      type: "success",
+      // Deliberately a root-level path: the fixture's setup script is what creates src/,
+      // and this run is proving that script never executes.
+      writes: [{ path: "feature.ts", content: "export const feature = 1;\n" }],
+      report: {
+        status: "success",
+        summary: "implemented change",
+        ownedPaths: ["."],
+        commandsAttempted: ["node implement.js"],
+        changedPaths: ["feature.ts"],
+        artifacts: []
+      }
+    }
+  ]);
+  const reviewerStorePath = await createFakeProviderStore([successReviewStep()]);
+  const config = baseConfig(projectRoot, gitStorePath, {
+    providers: {
+      claude: fakeProviderConfig({ storePath: providerStorePath, shimDir, vendor: "anthropic" }),
+      codex: null,
+      agy: fakeProviderConfig({ storePath: reviewerStorePath, shimDir, vendor: "google" })
+    },
+    reviewProviders: ["agy"]
+  });
+  await seedRelayConfig(projectRoot, config);
+
+  const result = await run({
+    projectRoot,
+    beadId: "example-app-123",
+    env: relayEnv({
+      bdStorePath,
+      gateStorePath,
+      gitStorePath,
+      extra: { PATH: `${shimDir}:${process.env.PATH}`, FAKE_SETUP_FAIL: "1" }
+    })
+  });
+  assert.equal(result.ok, true, "a project with no setup step must not fail on one");
+  assert.equal(
+    await pathExists(path.join(result.state.worktreePath, "src", "index.ts")),
+    false,
+    "the fixture setup script writes src/index.ts, so its absence proves it never ran"
+  );
 });
 
 test("run detects worktree setup failure and main-checkout drift", { timeout: 10000 }, async () => {

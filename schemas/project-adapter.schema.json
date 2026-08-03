@@ -39,12 +39,13 @@
           "minLength": 1
         },
         "worktreeSetupCommand": {
+          "description": "Command run in a fresh worktree before any work starts. An empty array means this project has no setup step and setup is skipped; it is never a placeholder for a command that does not exist yet.",
           "type": "array",
           "items": {
             "type": "string",
             "minLength": 1
           },
-          "minItems": 1
+          "minItems": 0
         }
       },
       "additionalProperties": false

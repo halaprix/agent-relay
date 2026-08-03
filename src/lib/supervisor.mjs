@@ -50,6 +50,7 @@ import { classifyProviderFailure, parseWorkerReport, runProviderCommand, provide
 import { assertTeamFacingTextClean, sanitizeIssueForPrompt, sanitizePromptText, sanitizeTeamFacingText, slugifyTitle } from "./sanitize.mjs";
 import { syncRoleBundles } from "./roles.mjs";
 import { buildBeadGraph } from "./bead-graph.mjs";
+import { ensureSessionHooks } from "./session-hooks.mjs";
 import { launchViewer } from "./viewer.mjs";
 import { renderBeadGraphHtml } from "./bead-graph-html.mjs";
 import {
@@ -513,6 +514,12 @@ async function runCommandChecked({
 }
 
 async function runSetupCommands({ adapter, config, projectRoot, worktreePath }) {
+  // An empty command is "this project needs no worktree setup", which is a real state: a
+  // repository with no dependency install step has nothing honest to run here. The
+  // alternative - a placeholder path that does not exist - fails every first run.
+  if (adapter.repository.worktreeSetupCommand.length === 0) {
+    return null;
+  }
   const [command, ...args] = adapter.repository.worktreeSetupCommand;
   const run = await runCommandChecked({
     config,
@@ -1779,10 +1786,12 @@ export async function setup({ projectRoot, adapterName = null, adapterFile = nul
   const { config, excludePath, resourcesRoot, beadsDir } = await ensureProjectState(projectRoot, adapterName, adapter);
   const syncedRoles = await syncProjectRoles(projectRoot);
   const agentInstructions = await scaffoldAgentInstructions(projectRoot);
+  const sessionHooks = await ensureSessionHooks({ projectRoot, adapter });
   return ok("setup", {
     adapter: adapter.name,
     adapterPath,
     adapterSource,
+    sessionHooks,
     config,
     configPath: projectConfigPath(projectRoot),
     excludePath,

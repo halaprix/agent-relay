@@ -1,13 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { validateAdapter } from "../src/lib/adapter.mjs";
-import { buildAdapterFromFacts, detectProjectFacts, init, slugify } from "../src/lib/init.mjs";
+import {
+  WORKTREE_SETUP_SCRIPT,
+  buildAdapterFromFacts,
+  detectProjectFacts,
+  init,
+  slugify,
+  worktreeSetupScriptBody
+} from "../src/lib/init.mjs";
 import { projectStateRoot, repoPath } from "../src/lib/paths.mjs";
-import { readJson } from "../src/lib/fs.mjs";
+import { pathExists, readJson } from "../src/lib/fs.mjs";
 import { cleanupFixtures, createFakeBdStore, fixtureDir } from "./helpers.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -212,6 +219,88 @@ test("init writes an adapter, never overwrites without --force, and validates en
   const forced = await init({ projectRoot, name: "different-name", force: true, env: {} });
   assert.equal(forced.ok, true);
   assert.equal((await readJson(first.adapterPath)).name, "different-name");
+});
+
+// The worktree setup command used to be a hardcoded path to a script relay init never
+// created, so every new project's first `relay run` failed on a missing file. Detection
+// already knows the package manager, so the install step is derivable; when it is not
+// derivable the honest answer is no command at all, not a placeholder.
+
+test("worktreeSetupScriptBody uses each manager's lockfile-respecting install", () => {
+  assert.match(worktreeSetupScriptBody("pnpm"), /pnpm install --frozen-lockfile/);
+  assert.match(worktreeSetupScriptBody("yarn"), /yarn install --immutable/);
+  assert.match(worktreeSetupScriptBody("bun"), /bun install --frozen-lockfile/);
+  assert.match(worktreeSetupScriptBody("npm"), /npm ci/);
+  // An unknown manager must still produce a runnable script rather than "undefined".
+  assert.match(worktreeSetupScriptBody(null), /npm ci/);
+  for (const manager of ["pnpm", "yarn", "bun", "npm", null]) {
+    assert.match(worktreeSetupScriptBody(manager), /^#!\/usr\/bin\/env bash\n/);
+    assert.match(worktreeSetupScriptBody(manager), /set -euo pipefail/);
+  }
+});
+
+test("init generates an executable worktree setup script for a detected manager", async () => {
+  const projectRoot = await fixtureDir("agent-relay-init-worktree-script-");
+  await gitInit(projectRoot);
+  await writeFileDeep(
+    path.join(projectRoot, "package.json"),
+    JSON.stringify({ name: "scripted", scripts: { test: "vitest run" } })
+  );
+  await writeFile(path.join(projectRoot, "pnpm-lock.yaml"), "", "utf8");
+
+  const outcome = await init({ projectRoot, name: "scripted", env: {} });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.worktreeScript, "created");
+
+  const adapter = await readJson(outcome.adapterPath);
+  validateAdapter(adapter);
+  assert.deepEqual(adapter.repository.worktreeSetupCommand, [WORKTREE_SETUP_SCRIPT]);
+
+  // The adapter runs this as a command, so a non-executable file would fail the first
+  // worktree setup on permissions rather than on anything to do with the change.
+  const scriptPath = path.join(projectRoot, WORKTREE_SETUP_SCRIPT);
+  const info = await stat(scriptPath);
+  assert.ok(info.mode & 0o111, "generated script must be executable");
+  assert.match(await readFile(scriptPath, "utf8"), /pnpm install --frozen-lockfile/);
+  assert.ok(
+    outcome.summary.some((line) => line.includes(WORKTREE_SETUP_SCRIPT) && line.includes("pnpm install")),
+    "the summary must name the script it generated and the command inside it"
+  );
+});
+
+test("init omits the worktree command entirely when no package manager was detected", async () => {
+  const projectRoot = await fixtureDir("agent-relay-init-no-manager-");
+  await gitInit(projectRoot);
+
+  const outcome = await init({ projectRoot, name: "bare", env: {} });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.worktreeScript, null);
+
+  const adapter = await readJson(outcome.adapterPath);
+  validateAdapter(adapter);
+  assert.deepEqual(adapter.repository.worktreeSetupCommand, [], "an empty command means no setup step");
+  assert.equal(
+    await pathExists(path.join(projectRoot, WORKTREE_SETUP_SCRIPT)),
+    false,
+    "nothing to install means nothing to generate"
+  );
+  assert.ok(outcome.summary.some((line) => line.includes("worktree setup is skipped entirely")));
+});
+
+test("init never overwrites an existing worktree setup script", async () => {
+  const projectRoot = await fixtureDir("agent-relay-init-keep-script-");
+  await gitInit(projectRoot);
+  await writeFileDeep(path.join(projectRoot, "package.json"), JSON.stringify({ name: "kept" }));
+  await writeFile(path.join(projectRoot, "package-lock.json"), "{}", "utf8");
+  const scriptPath = path.join(projectRoot, WORKTREE_SETUP_SCRIPT);
+  await writeFileDeep(scriptPath, "#!/usr/bin/env bash\necho project-specific setup\n");
+
+  const outcome = await init({ projectRoot, name: "kept", env: {} });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.worktreeScript, "kept-existing");
+  assert.match(await readFile(scriptPath, "utf8"), /project-specific setup/);
+  const adapter = await readJson(outcome.adapterPath);
+  assert.deepEqual(adapter.repository.worktreeSetupCommand, [WORKTREE_SETUP_SCRIPT]);
 });
 
 test("init seeds the required bd memory, scoped to the project's own store, when one is present", { timeout: 10000 }, async () => {

@@ -95,7 +95,9 @@ What it detects, with no dependency beyond what's already on `PATH`:
 - **A Beads store**, and if one already exists, `relay init` seeds the one `bd remember` memory the adapter's `beads.memoryKey` requires — without it, the very first `relay plan`/`run`/`review` fails with "required memory key missing." If no store exists yet, the summary names the exact `bd init`/`bd remember` commands to run first.
 - Existing `docs/architecture`, `docs/adr`, `AGENTS.md`, and `STATE.md`, feeding `guidance.architectureRoots` and `guidance.requiredFiles` — never claiming a file is required when it does not exist yet, since `relay doctor` checks that literally.
 
-What it refuses to guess, on purpose: risk classes beyond `documentation` and `normal-code` (plus `solidity-core` when Foundry is found) — nothing in a repository's file layout implies a `money-path` or `shared-infrastructure` concept, so those are left for a human to add. `repository.worktreeSetupCommand` always defaults to `scripts/dev/worktree-setup.sh`, which a fresh project almost never has yet; the summary says so rather than pretending otherwise. Never overwrites an existing adapter without `--force`.
+- **The worktree bootstrap script.** When a package manager was detected, `relay init` generates an executable `scripts/dev/worktree-setup.sh` running that manager's lockfile-respecting install (`pnpm install --frozen-lockfile`, `yarn install --immutable`, `bun install --frozen-lockfile`, `npm ci`) and points `repository.worktreeSetupCommand` at it. A worktree is a throwaway checkout of a known commit, so resolving fresh versions there would let a gate pass or fail for reasons unrelated to the change. An existing script is never overwritten, only referenced. When no package manager was detected there is no honest install step, so `worktreeSetupCommand` is `[]` — an explicit "this project has no setup step", which `relay run` skips. It is never a placeholder path to a file that does not exist; that shape failed every first run.
+
+What it refuses to guess, on purpose: risk classes beyond `documentation` and `normal-code` (plus `solidity-core` when Foundry is found) — nothing in a repository's file layout implies a `money-path` or `shared-infrastructure` concept, so those are left for a human to add. The generated worktree script installs dependencies and nothing else; a project needing a build or codegen step before a worker can work has to add it, and the summary says so. Never overwrites an existing adapter without `--force`.
 
 A project with nothing detectable at all still gets a **valid** adapter — every gate list defaults to `[]` rather than failing to construct, and `providerOrder` defaults to all four providers. Detection never blocks writing something reviewable.
 
@@ -107,6 +109,25 @@ A project with nothing detectable at all still gets a **valid** adapter — ever
 - Protected control-plane paths block worker writes unless the run is explicitly in plugin-maintenance mode.
 
 `relay setup` writes only local state beneath `.agents/agent-relay/` plus the ignored `.resources/` cache, adds both to local Git exclude state when available, and synchronizes provider role bundles into existing provider directories (a provider's own directory — `.claude/`, `.codex/`, `.agents/`, `.opencode/` — must already exist for its role bundles to sync there). It never overwrites `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `STATE.md`, or architecture documents, and it never overwrites an adapter that is already there.
+
+### Session-start hooks
+
+`relay setup` also guarantees the one piece of wiring that project law cannot cover. A session-start hook runs before the assistant has read a single instruction file, so a misconfigured one cannot be corrected by guidance. `bd init` writes a bare `bd prime --hook-json`, and on a machine that exports a global `BEADS_DIR` pointing at another project, that bare command primes the **wrong** store on every session start — silently.
+
+For each provider whose manifest declares a `sessionHook` (today, Claude: `.claude/settings.json`, event `SessionStart`), `relay setup` ensures the command is scoped to this project's own store:
+
+```
+BEADS_DIR="$CLAUDE_PROJECT_DIR/.beads" bd prime --hook-json
+```
+
+- A bare `bd prime` hook is **upgraded in place**, never duplicated alongside a second conflicting one.
+- A hook that already sets `BEADS_DIR` is left exactly as written — it may be a deliberate local variant.
+- Unrelated keys, other events, and sibling hooks in the file are preserved; the run is idempotent.
+- A `settings.json` that cannot be parsed is **reported, never overwritten**.
+- Nothing is written for a provider whose own directory does not exist, so a project that does not use it never gains its configuration file.
+- `$CLAUDE_PROJECT_DIR`, not `$PWD`: a `SessionStart` hook's working directory is wherever the session was invoked, which is not guaranteed to be the repository root. `--adapter`-configured stores are honoured too — an absolute `beads.requiredDir` is used as-is rather than being prefixed.
+
+Scoping `BEADS_DIR` on a single command and exporting it globally are opposite things: the prefix pins one call to this repository and makes an inherited global export harmless, while a profile-level export routes every other project on the machine into whichever store it names.
 
 ## Reference resources (`.resources/`)
 

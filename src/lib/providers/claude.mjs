@@ -25,6 +25,16 @@ export default {
   repoBundleDir: [".claude-plugin", "agents"],
   projectDir: [".claude", "agents"],
   attributionAliases: ["claude"],
+  // Where this harness reads session configuration, and the variable it exports naming the
+  // project root. CLAUDE_PROJECT_DIR is documented and is not interchangeable with $PWD: a
+  // SessionStart hook's working directory is wherever the session was invoked, which is not
+  // guaranteed to be the repository root. A provider whose hook format is unknown omits
+  // this descriptor entirely rather than guessing at one.
+  sessionHook: {
+    settingsPath: [".claude", "settings.json"],
+    event: "SessionStart",
+    projectDirVar: "CLAUDE_PROJECT_DIR"
+  },
   // Provider-owned per-role defaults, keyed by canonical role name (see ROLE_ORDER
   // in constants.mjs). A role source file may still override a single entry; see
   // resolveRoleModel in roles.mjs for the precedence rule.
